@@ -2,7 +2,7 @@
 
 A powerful TUI-based Kubernetes certificate management tool that simplifies the process of generating, distributing, and managing certificates for Kubernetes clusters.
 
-![Starquill TUI](https://raw.githubusercontent.com/username/starquill/main/docs/images/starquill-tui.png)
+![Starquill TUI](https://raw.githubusercontent.com/coopdloop/starquill-k8s-pki-manager/main/docs/images/starquill-tui.png)
 
 ## 🌟 Features
 
