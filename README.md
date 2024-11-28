@@ -1,140 +1,201 @@
-# ⭐ Starquill
+# Starquill - Kubernetes Certificate Management Suite
 
-A powerful TUI-based Kubernetes certificate management tool that simplifies the process of generating, distributing, and managing certificates for Kubernetes clusters.
+Starquill is a comprehensive Kubernetes certificate management suite that combines a powerful Terminal User Interface (TUI) with a modern web application for visual cluster management. Built with Rust and React, it provides a robust solution for generating, distributing, and managing certificates across your Kubernetes cluster.
 
-![Starquill TUI](https://raw.githubusercontent.com/coopdloop/starquill-k8s-pki-manager/main/docs/images/starquill-tui.png)
 
-## 🌟 Features
+![Starquill TUI](https://raw.githubusercontent.com/coopdloop/starquill-k8s-pki-manager/main/docs/images/starquill_web_ui.png)
 
-- **Interactive TUI Interface**: Built with Ratatui for a seamless terminal user experience
-- **Comprehensive Certificate Management**:
-  - Root CA generation
-  - Kubernetes CA generation
+## Features
+
+### Core Certificate Management
+- Complete certificate lifecycle management:
+  - Root CA and Kubernetes CA generation
   - API Server certificates
   - Node certificates
-  - Service Account key pairs
-  - Controller Manager certificates
-- **Automated Workflows**: One-click automation for generating and distributing all required certificates
-- **Real-time Certificate Status**: Visual tracking of certificate generation and distribution status
-- **SSH-based Distribution**: Secure certificate distribution to cluster nodes
-- **Certificate Verification**: Built-in verification of generated certificates
-- **Configuration Management**: Interactive configuration editor with SSH key path auto-completion
+  - Service Account keys
+  - Controller Manager and Scheduler certificates
+- Automated certificate chain creation and validation
+- Secure certificate distribution via SSH
+- Encryption configuration for data-at-rest
 
-## 🚀 Quick Start
+### Terminal User Interface (TUI)
+- Interactive terminal dashboard built with Ratatui
+- Real-time operation logging
+- Visual certificate status tracking
+- Interactive configuration management
+- Operation confirmation dialogs
 
+### Web Interface & API
+- Modern React/Vite web application
+- Visual drag-and-drop node topology editor
+- Real-time cluster status updates
+- REST API with Swagger documentation
+- CORS support for cross-origin requests
+
+### API Endpoints
+- `/api/cluster` - Get cluster information and certificate status
+- `/health` - Server health check endpoint
+- `/swagger-ui` - Interactive API documentation
+- Static file serving for web application
+
+## Architecture
+
+### Backend (Rust)
+- Built with Axum web framework
+- Async runtime with Tokio
+- Thread-safe state management using Arc and RwLock
+- OpenAPI documentation using Utoipa
+- Graceful shutdown support
+- Structured logging system
+
+### Frontend (React/Vite)
+- Single-page application
+- Real-time cluster visualization
+- Certificate status dashboard
+- Node management interface
+- Responsive design
+
+## Installation
+
+### Prerequisites
+- Rust 1.70 or higher
+- Node.js 16+ and npm
+- OpenSSL development libraries
+- SSH access to cluster nodes
+
+### Building
 ```bash
-# Install using cargo
-cargo install starquill
+# Build backend
+cargo build --release
 
-# Run with default configuration
-starquill
-
-# Run with custom config file
-starquill --config cluster-config.yaml
-
-# Run in debug mode
-starquill --debug
+# Build frontend
+cd webapp
+npm install
+npm run build
 ```
 
-## 📋 Configuration
+## Configuration
 
-Create a `config.yaml` file:
+### Server Configuration
+- Default port: 3000 (configurable)
+- CORS configured for cross-origin requests
+- Supports API documentation via Swagger UI
 
-```yaml
-remote_user: kube-admin
-control_plane: 192.168.1.100
-worker_nodes:
-  - 192.168.1.101
-  - 192.168.1.102
-remote_dir: /etc/kubernetes/pki
-ssh_key_path: ~/.ssh/id_rsa
+### Cluster Configuration
+- Control plane node settings
+- Worker node management
+- SSH key configuration
+- Remote directory structure
+- Certificate distribution paths
+
+## Usage
+
+### Starting the Application
+```bash
+# Start with default settings
+./starquill
+
+# Specify custom port
+./starquill --port 8080
+
+# TUI-only mode
+./starquill --no-web
 ```
 
-## 🎮 Usage
+### Web Interface
+Access the web interface at `http://localhost:3000`
+- View cluster topology
+- Monitor certificate status
+- Manage node configuration
+- Track certificate distribution
 
-Navigate the TUI using:
-- `↑`/`↓`: Navigate menu items
-- `Enter`: Select menu item
-- `L`: View logs
-- `Q`: Quit application
-- `PgUp`/`PgDn`: Scroll logs
-- `Esc`: Exit current view
+### API Documentation
+Access Swagger UI at `http://localhost:3000/swagger-ui`
+- Interactive API documentation
+- Request/response examples
+- API schema information
 
-## 🔧 Certificate Operations
+### Certificate Operations
+1. Configure cluster details via TUI or web interface
+2. Generate Root CA and Kubernetes CA
+3. Generate component certificates
+4. Distribute certificates securely
+5. Verify distribution and trust chain
+6. Monitor status through web interface
 
-Starquill manages the following certificate operations:
+## Security
 
-1. **Root CA**
-   - Generate root certificate authority
-   - Establish trust anchor for cluster
+### Certificate Security
+- Secure generation and storage
+- Proper file permissions
+- SSH-based secure distribution
+- Certificate chain verification
 
-2. **Kubernetes CA**
-   - Generate intermediate CA
-   - Create certificate chain
+### Web Security
+- CORS protection
+- Secure state management
+- Input validation
+- Error handling
 
-3. **Control Plane Certificates**
-   - API Server certificate
-   - Controller Manager certificate
-   - Scheduler certificate
-   - Service Account key pairs
+## Development
 
-4. **Node Certificates**
-   - Kubelet client certificates
-   - Kubelet serving certificates
-
-## 🛠️ Development
-
+### Backend Development
 ```bash
-# Clone repository
-git clone https://github.com/coopdloop/starquill-k8s-pki-manager
-
-# Build project
-cargo build
+# Run with debug logging
+RUST_LOG=debug cargo run
 
 # Run tests
 cargo test
-
-# Run with debug logging
-cargo run -- --debug
 ```
 
-### Project Structure
-
-```
-src/
-├── app/        # Application logic and state management
-├── cert/       # Certificate generation and operations
-├── config/     # Configuration handling
-├── types/      # Type definitions
-├── ui/         # TUI components and rendering
-└── utils/      # Utility functions and helpers
+### Frontend Development
+```bash
+cd webapp
+npm run dev
 ```
 
-## 🔐 Security Considerations
+## API Reference
 
-- All private keys are generated with appropriate permissions (600)
-- SSH-based secure distribution of certificates
-- Certificate verification before distribution
-- Support for custom certificate validity periods
-- Automated cleanup of sensitive temporary files
+### GET /api/cluster
+Returns cluster information including:
+- Control plane details
+- Worker node information
+- Certificate status for each node
+- Distribution status
+- Last update timestamps
 
-## 🤝 Contributing
+### Response Format
+```json
+{
+  "data": {
+    "control_plane": {
+      "ip": "string",
+      "certs": [
+        {
+          "cert_type": "string",
+          "status": "string",
+          "last_updated": "string"
+        }
+      ]
+    },
+    "workers": [
+      {
+        "ip": "string",
+        "certs": [...]
+      }
+    ]
+  }
+}
+```
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+## Contributing
+Contributions welcome! Please read our contributing guidelines and submit PRs to my repository.
 
-## 📝 License
+## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+(Still in early development)
 
-## 🙏 Acknowledgments
+[Insert License Information]
 
-- Built with [Ratatui](https://github.com/tui-rs-revival/ratatui)
-- Inspired by the need for simpler Kubernetes certificate management
-
-## 📞 Support
-
-For support, please open an issue in the GitHub repository or contact the maintainers.
-
----
-
-Built with ❤️ for the Kubernetes community
+## Support
+For issues and feature requests, please use our GitHub issue tracker.

@@ -424,7 +424,7 @@ export const ClusterVisualization = () => {
                                     name: `Worker ${index + 1}`,
                                     ip: worker.ip
                                 }}
-                                onAction={() => setSelectedNode(`worker${index + 1}`)}
+                                onAction={() => setSelectedNode(`${worker.ip}`)}
                             />
                         ))}
                     </div>
