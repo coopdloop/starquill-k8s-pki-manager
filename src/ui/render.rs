@@ -20,7 +20,7 @@ pub fn render_all(f: &mut Frame, cert_manager: &CertManager) {
         .constraints([
             Constraint::Length(4),  // Title
             Constraint::Length(7),  // Status/Config
-            Constraint::Length(15), // Menu
+            Constraint::Length(18), // Menu
             Constraint::Length(12), // Cert Status
             Constraint::Max(12),    // Logs
             Constraint::Length(3),  // Help
@@ -61,26 +61,12 @@ fn render_title(f: &mut Frame, area: Rect) {
                 .underlined(),
         )]),
         // Second line with Kubernetes Certificate Manager
-        Line::from(vec![
-            Span::styled(
-                "Kubernetes ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Certificate ",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Manager",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            "Kubernetes Certificate Manager",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
     ])
     .alignment(Alignment::Center)
     .block(
@@ -92,7 +78,31 @@ fn render_title(f: &mut Frame, area: Rect) {
 }
 
 fn render_status(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
-    let status_info = cert_manager.get_status_info();
+    let web_state = cert_manager.web_state.read().unwrap();
+    let web_status = if web_state.is_running {
+        let url = format!("http://localhost:{}", web_state.port);
+        vec![
+            Span::styled("Web UI: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Running", Style::default().fg(Color::Green)),
+            Span::raw(" at "),
+            Span::styled(
+                url,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+            Span::raw(" (press O to open in browser)"),
+        ]
+    } else {
+        vec![
+            Span::styled("Web UI: ", Style::default().fg(Color::Cyan)),
+            Span::styled("Starting...", Style::default().fg(Color::Yellow)),
+        ]
+    };
+
+    let mut status_info = cert_manager.get_status_info();
+    status_info.push(Line::from(web_status));
+
     let status = Paragraph::new(status_info)
         .block(
             Block::default()
@@ -151,7 +161,50 @@ pub fn render_menu(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
 }
 
 fn render_certificate_status(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
-    let status_info = cert_manager.get_certificate_status_info();
+    // let status_info = cert_manager.get_certificate_status_info();
+    let mut status_info = Vec::new();
+
+    // Add headers
+    status_info.push(Line::from(vec![
+        Span::styled(
+            format!("{:<20}", "NAME"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<12}", "DISTRIBUTED"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<12}", "VERIFIED"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "TIMESTAMP",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Add separator line
+    status_info.push(Line::from(vec![Span::styled(
+        "─".repeat(area.width as usize - 2), // -2 for borders
+        Style::default().fg(Color::DarkGray),
+    )]));
+
+    // Add certificate information
+    let cert_info = cert_manager.get_certificate_status_info();
+    if cert_info.len() == 1 && cert_info[0].spans[0].content == "No certificates generated yet" {
+        status_info.push(cert_info[0].clone());
+    } else {
+        status_info.extend(cert_info);
+    }
 
     let status_widget = Paragraph::new(status_info)
         .block(

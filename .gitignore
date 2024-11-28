@@ -16,4 +16,12 @@ Cargo.lock
 
 # App specific
 certs/
+kubeconfig/
 cluster_config.json
+certificate_status.json
+web_server.log
+
+# Web App specific
+webapp/dist/
+webapp/node_modules/
+webapp/.env

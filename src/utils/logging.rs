@@ -1,7 +1,7 @@
 use std::{fs::{self, OpenOptions}, io::Write, path::Path};
 use chrono::Local;
 
-pub trait Logger {
+pub trait Logger: Send + Sync {
     fn log(&mut self, message: &str);
     fn debug_log(&mut self, message: &str);
 }

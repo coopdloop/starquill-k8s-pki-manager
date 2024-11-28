@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+.node-enter {
+  opacity: 0;
+  transform: scale(0.9);
+}
+.node-enter-active {
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity 300ms, transform 300ms;
+}
+.node-exit {
+  opacity: 1;
+  transform: scale(1);
+}
+.node-exit-active {
+  opacity: 0;
+  transform: scale(0.9);
+  transition: opacity 300ms, transform 300ms;
+}
+
+.connection-enter {
+  opacity: 0;
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+}
+.connection-enter-active {
+  opacity: 1;
+  stroke-dashoffset: 0;
+  transition: opacity 300ms, stroke-dashoffset 1000ms ease-out;
+}
+.connection-exit {
+  opacity: 1;
+  stroke-dashoffset: 0;
+}
+.connection-exit-active {
+  opacity: 0;
+  stroke-dashoffset: 1000;
+  transition: opacity 300ms, stroke-dashoffset 1000ms ease-in;
+}

@@ -13,4 +13,12 @@ glob = "0.3.1"
 shellexpand = "3.1.0"
 clap = { version = "4.5.20", features = ["derive"] }
 base64 = "0.22.1"
-
+tokio = { version = "1.41.1", features = ["full"] }
+axum = { version = "0.7.9", features = ["macros"] }
+include_dir = "0.7.4"
+tower-http = { version = "0.6.2", features = ["fs", "cors"] }
+open = "5.3.1"
+utoipa = { version = "5.2.0", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "8.0.3", features = ["axum"] }
+serde_yaml = "0.9.34"
+uuid = { version = "1.11.0", features = ["v4"] }

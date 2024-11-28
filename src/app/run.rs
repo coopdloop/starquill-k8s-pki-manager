@@ -1,8 +1,9 @@
 use super::CertManager;
 use crate::types::{AppMode, ConfirmationCallback, ConfirmationDialog, ScrollDirection};
 use crate::ui;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
+use std::sync::{Arc, RwLock};
 use std::{
     io,
     time::{Duration, Instant},
@@ -10,170 +11,222 @@ use std::{
 
 pub fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    mut cert_manager: CertManager,
+    cert_manager: Arc<RwLock<CertManager>>,
 ) -> io::Result<()> {
     let mut last_tick = Instant::now();
     let tick_rate = Duration::from_millis(30);
 
     loop {
-        cert_manager.process_pending_logs();
+        let mut manager = cert_manager.write().unwrap();
+        manager.process_pending_logs();
 
-        terminal.draw(|f| ui::render_all(f, &cert_manager))?;
+        terminal.draw(|f| ui::render_all(f, &manager))?;
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
+        drop(manager);
+
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                match cert_manager.mode {
+                // Get a new lock for handling events
+                let mut manager = cert_manager.write().unwrap();
+
+                match manager.mode {
                     AppMode::ViewLogs => match key.code {
                         KeyCode::Esc => {
-                            cert_manager.mode = AppMode::Normal;
+                            manager.mode = AppMode::Normal;
                         }
                         KeyCode::Up => {
-                            cert_manager.scroll_logs(ScrollDirection::Up);
+                            manager.scroll_logs(ScrollDirection::Up);
                         }
                         KeyCode::Down => {
-                            cert_manager.scroll_logs(ScrollDirection::Down);
+                            manager.scroll_logs(ScrollDirection::Down);
                         }
                         KeyCode::PageUp => {
-                            cert_manager.scroll_logs(ScrollDirection::PageUp);
+                            manager.scroll_logs(ScrollDirection::PageUp);
                         }
                         KeyCode::PageDown => {
-                            cert_manager.scroll_logs(ScrollDirection::PageDown);
+                            manager.scroll_logs(ScrollDirection::PageDown);
                         }
                         KeyCode::Home => {
-                            cert_manager.scroll_logs(ScrollDirection::Top);
+                            manager.scroll_logs(ScrollDirection::Top);
                         }
                         KeyCode::End => {
-                            cert_manager.scroll_logs(ScrollDirection::Bottom);
+                            manager.scroll_logs(ScrollDirection::Bottom);
                         }
                         _ => {}
                     },
                     AppMode::Normal => match key.code {
                         KeyCode::Char('q') => return Ok(()),
                         KeyCode::Char('l') | KeyCode::Char('L') => {
-                            cert_manager.mode = AppMode::ViewLogs;
+                            manager.mode = AppMode::ViewLogs;
                         }
                         KeyCode::Up => {
-                            cert_manager.selected_menu = cert_manager
+                            manager.selected_menu = manager
                                 .selected_menu
                                 .checked_sub(1)
-                                .unwrap_or(cert_manager.menu_items.len() - 1);
+                                .unwrap_or(manager.menu_items.len() - 1);
                         }
                         KeyCode::Down => {
-                            cert_manager.selected_menu =
-                                (cert_manager.selected_menu + 1) % cert_manager.menu_items.len();
+                            manager.selected_menu =
+                                (manager.selected_menu + 1) % manager.menu_items.len();
                         }
-                        KeyCode::Enter => match cert_manager.selected_menu {
+                        KeyCode::Char('o') => {
+                            if key.modifiers == KeyModifiers::NONE {
+                                manager.open_web_ui();
+                            }
+                        }
+                        KeyCode::Enter => match manager.selected_menu {
                             0 => {
-                                if let Err(e) = cert_manager.generate_root_ca() {
-                                    cert_manager.log(&format!("Error: {}", e));
+                                if let Err(e) = manager.generate_root_ca() {
+                                    manager.log(&format!("Error: {}", e));
                                 }
                             }
                             1 => {
-                                if let Err(e) = cert_manager.generate_kubernetes_cert() {
-                                    cert_manager.log(&format!("Error: {}", e));
+                                if let Err(e) = manager.generate_kubernetes_cert() {
+                                    manager.log(&format!("Error: {}", e));
                                 }
                             }
                             2 => {
-                                if let Err(e) = cert_manager.generate_kubelet_client_cert() {
-                                    cert_manager.log(&format!("Error: {}", e));
+                                if let Err(e) = manager.generate_kubelet_client_cert() {
+                                    manager.log(&format!("Error: {}", e));
                                 }
                             }
                             3 => {
-                                if let Err(e) = cert_manager.generate_worker_node_certs() {
-                                    cert_manager.log(&format!("Error: {}", e));
+                                if let Err(e) = manager.generate_worker_node_certs() {
+                                    manager.log(&format!("Error: {}", e));
                                 }
                             }
                             4 => {
-                                if let Err(e) = cert_manager.generate_service_account_keys() {
-                                    cert_manager.log(&format!("Error: {}", e));
+                                if let Err(e) = manager.generate_service_account_keys() {
+                                    manager.log(&format!("Error: {}", e));
                                 }
                             }
                             5 => {
-                                cert_manager.set_current_operation(
+                                manager.set_current_operation(
                                     "Generating Controller Manager Certificate",
                                 );
-                                if let Err(e) = cert_manager.generate_controller_manager_cert() {
-                                    cert_manager.log(&format!(
+                                if let Err(e) = manager.generate_controller_manager_cert() {
+                                    manager.log(&format!(
                                         "Failed to generate Controller Manager certificate: {}",
                                         e
                                     ));
                                 } else {
-                                    cert_manager.log(
+                                    manager.log(
                                         "Controller Manager certificate generated successfully",
                                     );
                                 }
                             }
+
                             6 => {
-                                cert_manager.mode = AppMode::EditConfig;
-                                cert_manager.log("Entered configuration mode");
+                                // Generate Kubeconfigs
+                                manager.set_current_operation("Starting kubeconfig generation...");
+                                if let Err(e) = manager.generate_all_kubeconfigs() {
+                                    manager.log(&format!("Failed to generate kubeconfigs: {}", e));
+                                } else {
+                                    manager.log("Kubeconfig generation completed successfully");
+                                    // Offer to distribute
+                                    manager.confirmation_dialog = Some(ConfirmationDialog {
+                                        message:
+                                            "Do you want to distribute the generated kubeconfigs?"
+                                                .to_string(),
+                                        callback: ConfirmationCallback::DistributePending,
+                                    });
+                                    manager.mode = AppMode::Confirmation;
+                                }
                             }
                             7 => {
-                                if let Err(e) = cert_manager.save_config() {
-                                    cert_manager.log(&format!("Failed to save config: {}", e));
+                                // Generate Encryption Config
+                                manager.set_current_operation(
+                                    "Starting encryption config generation...",
+                                );
+                                if let Err(e) = manager.generate_encryption_config() {
+                                    manager.log(&format!(
+                                        "Failed to generate encryption config: {}",
+                                        e
+                                    ));
                                 } else {
-                                    cert_manager.log("Configuration saved successfully");
+                                    manager.log("Encryption config generated successfully");
+                                    // Offer to distribute
+                                    manager.confirmation_dialog = Some(ConfirmationDialog {
+                                        message: "Do you want to distribute the encryption config?"
+                                            .to_string(),
+                                        callback: ConfirmationCallback::DistributePending,
+                                    });
+                                    manager.mode = AppMode::Confirmation;
                                 }
                             }
+
                             8 => {
-                                // Verify Certificates
-                                if let Err(e) = cert_manager.verify_certificates() {
-                                    cert_manager
-                                        .log(&format!("Certificate verification failed: {}", e));
+                                // Edit mode
+                                manager.mode = AppMode::EditConfig;
+                                manager.log("Entered configuration mode");
+                            }
+                            9 => {
+                                // Save mode
+                                if let Err(e) = manager.save_config() {
+                                    manager.log(&format!("Failed to save config: {}", e));
+                                } else {
+                                    manager.log("Configuration saved successfully");
                                 }
                             }
-                            9 => return Ok(()), // Exit
                             10 => {
+                                // Verify Certificates
+                                if let Err(e) = manager.verify_certificates() {
+                                    manager.log(&format!("Certificate verification failed: {}", e));
+                                }
+                            }
+                            11 => return Ok(()), // Exit
+                            12 => {
                                 // Distribute Pending Certificates
-                                let undistributed = cert_manager.cert_tracker.get_undistributed();
+                                let undistributed = manager.cert_tracker.get_undistributed();
                                 if undistributed.is_empty() {
-                                    cert_manager.log("No pending certificates to distribute");
+                                    manager.log("No pending certificates to distribute");
                                 } else {
-                                    cert_manager.confirmation_dialog = Some(ConfirmationDialog {
+                                    manager.confirmation_dialog = Some(ConfirmationDialog {
                                         message: format!(
                                             "Distribute {} pending certificates?",
                                             undistributed.len()
                                         ),
                                         callback: ConfirmationCallback::DistributePending,
                                     });
-                                    cert_manager.mode = AppMode::Confirmation;
+                                    manager.mode = AppMode::Confirmation;
                                 }
                             }
-                            11 => {
+                            13 => {
                                 // Save Certificate Status
-                                if let Err(e) = cert_manager.save_certificate_status() {
-                                    cert_manager
+                                if let Err(e) = manager.save_certificate_status() {
+                                    manager
                                         .log(&format!("Failed to save certificate status: {}", e));
                                 } else {
-                                    cert_manager.log("Certificate status saved successfully");
+                                    manager.log("Certificate status saved successfully");
                                 }
                             }
-                            12 => {
+                            14 => {
                                 // Automate all
-                                cert_manager.confirmation_dialog = Some(ConfirmationDialog {
+                                manager.confirmation_dialog = Some(ConfirmationDialog {
                                     message: "Do you want to automatically generate and distribute all certificates?".to_string(),
                                     callback: ConfirmationCallback::AutomateAll,
                                 });
-                                cert_manager.mode = AppMode::Confirmation;
+                                manager.mode = AppMode::Confirmation;
                             }
 
-                            _ => cert_manager.log("Function not implemented yet"),
+                            _ => manager.log("Function not implemented yet"),
                         },
                         _ => {}
                     },
                     AppMode::EditConfig => {
-                        cert_manager.handle_config_edit(key.code);
+                        manager.handle_config_edit(key.code);
                     }
 
                     AppMode::Confirmation => match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            cert_manager.handle_confirmation(true);
+                            manager.handle_confirmation(true);
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            cert_manager.handle_confirmation(false);
+                            manager.handle_confirmation(false);
                         }
                         _ => {}
                     },

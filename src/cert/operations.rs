@@ -1,5 +1,7 @@
 // src/cert/operations.rs
 
+use uuid::Uuid;
+
 use crate::utils::logging::Logger;
 use std::path::Path;
 use std::process::Command;
@@ -96,7 +98,10 @@ impl CertificateOperations {
                 "-i",
                 &self.ssh_key_path,
                 &format!("{}@{}", self.remote_user, host),
-                &format!("sudo mkdir -p {}", self.remote_dir),
+                &format!(
+                    "sudo mkdir -p {} && sudo chown root:root {}",
+                    self.remote_dir, self.remote_dir
+                ),
             ])
             .output()?;
 
@@ -110,33 +115,15 @@ impl CertificateOperations {
             ));
         }
 
-        self.log(&format!(
-            "Remote directory {} created on {}",
-            self.remote_dir, host
-        ));
         Ok(())
     }
-
-    // pub fn prepare_remote_hosts(&mut self, hosts: &[&str]) -> io::Result<()> {
-    //     self.log("Preparing remote hosts...");
-    //
-    //     for host in hosts {
-    //         if let Err(e) = self.ensure_remote_directory(host) {
-    //             self.log(&format!("Failed to prepare remote host {}: {}", host, e));
-    //             return Err(e);
-    //         }
-    //     }
-    //
-    //     self.log("All remote hosts prepared successfully");
-    //     Ok(())
-    // }
 
     pub fn generate_cert(
         &mut self,
         cert_name: &str,
         ca_dir: &str,
         config: &CertificateConfig,
-        hosts: &[&str],
+        _hosts: &[&str],
     ) -> Result<(), CertOperationError> {
         self.logger
             .log(&format!("Generating certificate for {}", cert_name));
@@ -226,17 +213,7 @@ impl CertificateOperations {
             extended_key_usage: vec![],
         };
 
-        self.logger.log("Generating Root CA certificate");
         self.generate_cert("ca", "certs/root-ca", &root_config, hosts)?;
-
-        // Verify root CA files exist
-        if !Path::new("certs/root-ca/ca.crt").exists()
-            || !Path::new("certs/root-ca/ca.key").exists()
-        {
-            return Err(CertOperationError::CertGeneration(
-                "Root CA files not generated properly".to_string(),
-            ));
-        }
 
         // 2. Generate Kubernetes CA
         let k8s_config = CertificateConfig {
@@ -255,13 +232,8 @@ impl CertificateOperations {
             extended_key_usage: vec![],
         };
 
-        self.logger.log("Generating Kubernetes CA certificate");
         self.generate_cert("ca", "certs/root-ca", &k8s_config, hosts)?;
-
-        // 3. Create the CA chain
-        if let Err(e) = self.create_ca_chain() {
-            self.logger.log(&format!("Error {}", e))
-        }
+        self.create_ca_chain()?;
 
         Ok(())
     }
@@ -294,152 +266,88 @@ impl CertificateOperations {
         Ok(())
     }
 
-    pub fn distribute_certificates(
-        &mut self,
-        cert_name: &str,
-        hosts: &Vec<String>,
-    ) -> Result<(), CertOperationError> {
-        for host in hosts {
-            // Ensure remote directory exists before copying
-            if let Err(e) = self.ensure_remote_directory(host) {
-                self.log(&format!(
-                    "Failed to create remote directory on {}: {}",
-                    host, e
-                ));
-                return Err(CertOperationError::Distribution(format!(
-                    "Failed to create remote directory on {}: {}",
-                    host, e
-                )));
-            }
-
-            self.copy_to_k8s_paths(cert_name, host).map_err(|e| {
-                CertOperationError::Distribution(format!("Failed to distribute to {}: {}", host, e))
-            })?;
-        }
-        Ok(())
-    }
+    // pub fn distribute_certificates(
+    //     &mut self,
+    //     cert_name: &str,
+    //     hosts: &Vec<String>,
+    // ) -> Result<(), CertOperationError> {
+    //     for host in hosts {
+    //         // Ensure remote directory exists before copying
+    //         if let Err(e) = self.ensure_remote_directory(host) {
+    //             self.log(&format!(
+    //                 "Failed to create remote directory on {}: {}",
+    //                 host, e
+    //             ));
+    //             return Err(CertOperationError::Distribution(format!(
+    //                 "Failed to create remote directory on {}: {}",
+    //                 host, e
+    //             )));
+    //         }
+    //
+    //         self.copy_to_k8s_paths(cert_name, host).map_err(|e| {
+    //             CertOperationError::Distribution(format!("Failed to distribute to {}: {}", host, e))
+    //         })?;
+    //     }
+    //     Ok(())
+    // }
 
     // Distribution methods stay mostly the same but with improved error handling
     pub fn copy_to_k8s_paths(&mut self, cert_name: &str, remote_host: &str) -> io::Result<()> {
-        self.logger.log(&format!(
-            "Copying {} certificates to {}",
-            cert_name, remote_host
-        ));
+        self.logger
+            .log(&format!("Copying {} to {}", cert_name, remote_host));
 
-        let cert_base_path = format!("certs/{}", cert_name);
-
-        match cert_name {
-            "kubernetes-ca" => self.copy_ca_certs(&cert_base_path, remote_host),
-            // "ca-chain" => self.copy_ca_certs(&cert_base_path, remote_host),
-            "kube-apiserver" | "controller-manager" | "scheduler" => {
-                self.copy_component_certs(cert_name, &cert_base_path, remote_host)
-            }
-            "service-account" => self.copy_service_account_keys(&cert_base_path, remote_host),
-            name if name.starts_with("node-") => {
-                self.copy_node_certs(name, &cert_base_path, remote_host)
-            }
-
-            name if name.starts_with("kubeconfig/") => {
-                let config_name = name.strip_prefix("kubeconfig/").unwrap();
-                self.copy_with_sudo(
-                    name,
-                    &format!("/etc/kubernetes/{}", config_name),
-                    remote_host,
-                )
-            }
-            "encryption-config" => self.copy_with_sudo(
-                "encryption-config.yaml",
-                &format!("{}/encryption-config.yaml", self.remote_dir),
-                remote_host,
+        // Handle different types of files with their full paths
+        let (source_path, remote_path) = match cert_name {
+            name if name.starts_with("kubeconfig/") => (
+                name.to_string(),
+                format!(
+                    "/etc/kubernetes/{}",
+                    name.strip_prefix("kubeconfig/").unwrap()
+                ),
             ),
-            "root-ca" | "ca-chain" => Ok(()),
-            _ => {
-                self.logger
-                    .log(&format!("Unknown file type {}, skipping copy.", cert_name));
-                Ok(())
-            }
-        }
-    }
+            "encryption-config.yaml" => (
+                cert_name.to_string(),
+                format!("{}/encryption-config.yaml", self.remote_dir),
+            ),
+            name if name.starts_with("certs/") => (
+                name.to_string(),
+                format!(
+                    "{}/{}",
+                    self.remote_dir,
+                    Path::new(name).file_name().unwrap().to_str().unwrap()
+                ),
+            ),
+            _ => (
+                format!("certs/{}", cert_name),
+                format!(
+                    "{}/{}",
+                    self.remote_dir,
+                    Path::new(cert_name).file_name().unwrap().to_str().unwrap()
+                ),
+            ),
+        };
 
-    // Helper methods to make copy_to_k8s_paths cleaner
-    fn copy_ca_certs(&mut self, base_path: &str, remote_host: &str) -> io::Result<()> {
-        self.copy_with_sudo(
-            &format!("{}/ca-chain.crt", base_path),
-            &format!("{}/ca-chain.crt", self.remote_dir),
-            remote_host,
-        )?;
-        self.copy_with_sudo(
-            &format!("{}/ca.key", base_path),
-            &format!("{}/kubernetes-ca.key", self.remote_dir),
-            remote_host,
-        )?;
-        self.copy_with_sudo(
-            &format!("{}/ca.crt", base_path),
-            &format!("{}/kubernetes-ca.crt", self.remote_dir),
-            remote_host,
-        )
-    }
+        self.ensure_remote_directory(remote_host)?;
 
-    fn copy_component_certs(
-        &mut self,
-        component: &str,
-        base_path: &str,
-        remote_host: &str,
-    ) -> io::Result<()> {
-        self.copy_with_sudo(
-            &format!("{}/{}.crt", base_path, component),
-            &format!("{}/{}.crt", self.remote_dir, component),
-            remote_host,
-        )?;
-        self.copy_with_sudo(
-            &format!("{}/{}.key", base_path, component),
-            &format!("{}/{}.key", self.remote_dir, component),
-            remote_host,
-        )
-    }
+        // Debug log the exact paths being used
+        self.debug_log(&format!("Source path: {}", source_path));
+        self.debug_log(&format!("Remote path: {}", remote_path));
 
-    fn copy_service_account_keys(&mut self, base_path: &str, remote_host: &str) -> io::Result<()> {
-        self.copy_with_sudo(
-            &format!("{}/sa.key", base_path),
-            &format!("{}/sa.key", self.remote_dir),
-            remote_host,
-        )?;
-        self.copy_with_sudo(
-            &format!("{}/sa.pub", base_path),
-            &format!("{}/sa.pub", self.remote_dir),
-            remote_host,
-        )
-    }
+        self.copy_with_sudo(&source_path, &remote_path, remote_host)?;
 
-    fn copy_node_certs(
-        &mut self,
-        node_name: &str,
-        base_path: &str,
-        remote_host: &str,
-    ) -> io::Result<()> {
-        self.copy_with_sudo(
-            &format!("{}/{}.crt", base_path, node_name),
-            &format!("{}/{}.crt", self.remote_dir, node_name),
-            remote_host,
-        )?;
-        self.copy_with_sudo(
-            &format!("{}/{}.key", base_path, node_name),
-            &format!("{}/{}.key", self.remote_dir, node_name),
-            remote_host,
-        )
+        self.logger.log(&format!(
+            "Successfully copied {} to {}:{}",
+            cert_name, remote_host, remote_path
+        ));
+        Ok(())
     }
 
     pub fn copy_with_sudo(&mut self, source: &str, target: &str, host: &str) -> io::Result<()> {
-        let temp_file = format!(
-            "/tmp/{}",
-            std::path::Path::new(source)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-        );
+        // Generate a unique temporary filename
+        let unique_id = Uuid::new_v4();
+        let temp_file = format!("/tmp/cert_{}", unique_id);
 
-        // First, copy to temporary location
+        // First, copy to temporary location with restrictive permissions
         let scp_output = Command::new("scp")
             .args(&[
                 "-i",
@@ -459,10 +367,14 @@ impl CertificateOperations {
             ));
         }
 
-        // Then move to final location with sudo
+        // Then move to final location with sudo and clean up
         let ssh_commands = format!(
-            "sudo mv {} {} && sudo chown root:root {} && sudo chmod 644 {}",
-            temp_file, target, target, target
+            "sudo mkdir -p $(dirname {}) && \
+             sudo mv {} {} && \
+             sudo chown root:root {} && \
+             sudo chmod 600 {} && \
+             rm -f {}",
+            target, temp_file, target, target, target, temp_file
         );
 
         let ssh_output = Command::new("ssh")
@@ -540,13 +452,5 @@ impl CertificateOperations {
         }
 
         Ok(())
-    }
-
-    pub fn copy_kubeconfig(&mut self, name: &str, host: &str) -> io::Result<()> {
-        self.copy_to_k8s_paths(&format!("kubeconfig/{}.conf", name), host)
-    }
-
-    pub fn copy_encryption_config(&mut self, host: &str) -> io::Result<()> {
-        self.copy_to_k8s_paths("encryption-config.yaml", host)
     }
 }

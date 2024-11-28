@@ -1,15 +1,19 @@
 // src/app/manager.rs
 use crate::cert::verification::CertificateVerifier;
-use crate::cert::ControllerManagerGenerator;
 use crate::cert::{
     CertificateConfig, CertificateOperations, CertificateType, ClusterEndpoints,
-    ControllerCertGenerator, NodeCertGenerator, ServiceAccountGenerator,
+    ControllerCertGenerator, ControllerManagerGenerator, NodeCertGenerator,
+    ServiceAccountGenerator,
 };
 use crate::config::{ClusterConfig, ConfigEditor};
+use crate::kubeconfig::{EncryptionConfigGenerator, KubeConfigGenerator};
+use crate::track_lock_count;
 use crate::types::{
     AppMode, CertTracker, ConfirmationCallback, ConfirmationDialog, ScrollDirection,
 };
 use crate::utils::logging::Logger;
+use crate::web::WebServerState;
+
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Local;
 use crossterm::event::KeyCode;
@@ -18,10 +22,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, RwLock};
 use std::{fs, io, path::PathBuf};
+use utoipa::ToSchema;
 
 // #[derive(Clone)]
 pub struct CertManager {
@@ -36,19 +42,24 @@ pub struct CertManager {
     pub log_scroll: usize,
     pub confirmation_dialog: Option<ConfirmationDialog>,
     pub cert_tracker: CertTracker,
+    pub web_state: Arc<RwLock<WebServerState>>,
     cert_ops: Option<CertificateOperations>,
-    log_receiver: Receiver<String>,
-    log_sender: Sender<String>,
+    // log_receiver: Receiver<String>,
+    // log_sender: Sender<String>,
+    log_receiver: tokio::sync::mpsc::Receiver<String>,
+    log_sender: tokio::sync::mpsc::Sender<String>,
+    pub kubeconfig_generator: Option<KubeConfigGenerator>,
+    pub encryption_generator: Option<EncryptionConfigGenerator>,
 }
 
 #[derive(Clone)]
 pub struct OperationsLogger {
-    sender: Sender<String>,
+    sender: tokio::sync::mpsc::Sender<String>,
     debug: bool,
 }
 
 impl OperationsLogger {
-    fn new(sender: Sender<String>, debug: bool) -> Self {
+    fn new(sender: tokio::sync::mpsc::Sender<String>, debug: bool) -> Self {
         Self { sender, debug }
     }
 }
@@ -64,9 +75,41 @@ impl Logger for OperationsLogger {
         }
     }
 }
+
+#[derive(Clone, Serialize, ToSchema)]
+pub struct ClusterInfo {
+    #[schema(example = "Control Plane Node")]
+    pub control_plane: NodeInfo,
+    pub workers: Vec<NodeInfo>,
+}
+
+#[derive(Clone, Serialize, ToSchema)]
+pub struct NodeInfo {
+    #[schema(example = "10.0.0.1")]
+    pub ip: String,
+    pub certs: Vec<CertStatus>,
+}
+
+#[derive(Clone, Serialize, ToSchema)]
+pub struct CertStatus {
+    #[schema(example = "kube-apiserver")]
+    pub cert_type: String,
+    #[schema(example = "Distributed")]
+    pub status: String,
+    #[schema(example = "2024-01-01T00:00:00Z")]
+    pub last_updated: Option<String>,
+}
+
+impl Default for CertManager {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl CertManager {
-    pub fn new(config: ClusterConfig, debug: bool) -> Self {
-        let (sender, receiver) = channel();
+    /// Creates a new [`CertManager`].
+    fn empty() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(100);
 
         let menu_items = vec![
             "Generate Root CA".to_string(),
@@ -75,34 +118,237 @@ impl CertManager {
             "Generate Node Certs".to_string(),
             "Generate Service Account Keys".to_string(),
             "Generate Controller Manager Cert".to_string(),
+            "Generate Kubeconfigs".to_string(),       // kubeconifg
+            "Generate Encryption Config".to_string(), // kubeconfig
             "Edit Configuration".to_string(),
             "Save Configuration".to_string(),
             "Verify Certificates".to_string(),
             "Exit".to_string(),
-            "Distribute Pending Certificates".to_string(), // New item
-            "Save Certificate Status".to_string(),         // New menu item
+            "Distribute Pending Certificates".to_string(),
+            "Save Certificate Status".to_string(),
             "Automate all".to_string(),
         ];
 
+        Self {
+            config: ClusterConfig::default(),
+            current_operation: String::new(),
+            logs: Vec::new(),
+            selected_menu: 0,
+            menu_items,
+            mode: AppMode::Normal,
+            config_editor: ConfigEditor::new(&ClusterConfig::default()),
+            debug: false,
+            log_scroll: 0,
+            confirmation_dialog: None,
+            cert_tracker: CertTracker::new(),
+            web_state: Arc::default(),
+            cert_ops: None,
+            log_receiver: receiver,
+            log_sender: sender,
+            kubeconfig_generator: None,
+            encryption_generator: None,
+        }
+    }
+
+    pub fn new(config: ClusterConfig, debug: bool, web_state: Arc<RwLock<WebServerState>>) -> Self {
+        track_lock_count(1, "CertManager::new:start");
+        let (sender, receiver) = tokio::sync::mpsc::channel(100);
         let mut manager = Self {
             config_editor: ConfigEditor::new(&config),
             config,
             current_operation: String::new(),
             logs: Vec::new(),
             selected_menu: 0,
-            menu_items,
+            menu_items: vec![
+                "Generate Root CA".to_string(),
+                "Generate Kubernetes CA".to_string(),
+                "Generate API Server Cert".to_string(),
+                "Generate Node Certs".to_string(),
+                "Generate Service Account Keys".to_string(),
+                "Generate Controller Manager Cert".to_string(),
+                "Generate Kubeconfigs".to_string(), // kubeconifg
+                "Generate Encryption Config".to_string(), // kubeconfig
+                "Edit Configuration".to_string(),
+                "Save Configuration".to_string(),
+                "Verify Certificates".to_string(),
+                "Exit".to_string(),
+                "Distribute Pending Certificates".to_string(),
+                "Save Certificate Status".to_string(),
+                "Automate all".to_string(),
+            ],
             mode: AppMode::Normal,
             debug,
             log_scroll: 0,
             confirmation_dialog: None,
             cert_tracker: CertTracker::new(),
+            web_state,
             cert_ops: None,
             log_receiver: receiver,
             log_sender: sender,
+            kubeconfig_generator: None,
+            encryption_generator: None,
+        };
+        manager.init_cert_ops();
+        track_lock_count(-1, "CertManager::new:end");
+        manager
+    }
+
+    // Add initialization method for generators
+    pub fn init_generators(&mut self) {
+        self.kubeconfig_generator = Some(KubeConfigGenerator::new(
+            self.config.control_plane.clone(),
+            PathBuf::from("kubeconfig"),
+            PathBuf::from("certs/kubernetes-ca/ca-chain.crt"),
+        ));
+
+        self.encryption_generator = Some(EncryptionConfigGenerator::new(PathBuf::from(
+            "encryption-config.yaml",
+        )));
+    }
+
+    fn track_kubeconfig(&mut self, config_name: &str, node: &str) {
+        self.cert_tracker.add_certificate(
+            &format!("kubeconfig-{}", config_name),
+            &format!("kubeconfig/{}.conf", config_name),
+            vec![node.to_string()],
+        );
+    }
+
+    pub async fn get_cluster_info(&self) -> ClusterInfo {
+        let control_certs = self
+            .cert_tracker
+            .certificates
+            .iter()
+            .filter(|c| c.hosts.contains(&self.config.control_plane))
+            .map(|c| CertStatus {
+                cert_type: c.cert_type.clone(),
+                status: if c.distributed.is_some() {
+                    "Distributed".into()
+                } else {
+                    "Generated".into()
+                },
+                // last_updated: c.distributed.or(Some(c.generated)),
+                last_updated: c
+                    .distributed
+                    .or(Some(c.generated))
+                    .map(|dt| dt.to_rfc3339()),
+            })
+            .collect();
+
+        let control_plane = NodeInfo {
+            ip: self.config.control_plane.clone(),
+            certs: control_certs,
         };
 
-        manager.init_cert_ops();
-        manager
+        let workers = self
+            .config
+            .worker_nodes
+            .iter()
+            .map(|ip| {
+                let node_certs = self
+                    .cert_tracker
+                    .certificates
+                    .iter()
+                    .filter(|c| c.hosts.contains(ip))
+                    .map(|c| CertStatus {
+                        cert_type: c.cert_type.clone(),
+                        status: if c.distributed.is_some() {
+                            "Distributed".into()
+                        } else {
+                            "Generated".into()
+                        },
+                        // last_updated: c.distributed.or(Some(c.generated)),
+                        last_updated: c
+                            .distributed
+                            .or(Some(c.generated))
+                            .map(|dt| dt.to_rfc3339()),
+                    })
+                    .collect();
+
+                NodeInfo {
+                    ip: ip.clone(),
+                    certs: node_certs,
+                }
+            })
+            .collect();
+
+        ClusterInfo {
+            control_plane,
+            workers,
+        }
+    }
+
+    pub fn generate_all_kubeconfigs(&mut self) -> io::Result<()> {
+        self.set_current_operation("Generating Kubeconfigs");
+        self.log("Starting kubeconfig generation...");
+
+        // Initialize generator if needed
+        if self.kubeconfig_generator.is_none() {
+            self.init_generators();
+        }
+
+        // Clone the values we need upfront
+        let control_plane = self.config.control_plane.clone();
+        let worker_nodes = self.config.worker_nodes.clone();
+
+        // Generate admin kubeconfig
+        {
+            let generator = self.kubeconfig_generator.as_ref().unwrap();
+            generator.generate_kubeconfig("admin", "default-admin")?;
+        }
+        self.track_kubeconfig("admin", &control_plane);
+
+        // Generate controller-manager kubeconfig
+        {
+            let generator = self.kubeconfig_generator.as_ref().unwrap();
+            generator
+                .generate_kubeconfig("controller-manager", "system:kube-controller-manager")?;
+        }
+        self.track_kubeconfig("controller-manager", &control_plane);
+
+        // Generate scheduler kubeconfig
+        {
+            let generator = self.kubeconfig_generator.as_ref().unwrap();
+            generator.generate_kubeconfig("scheduler", "system:kube-scheduler")?;
+        }
+        self.track_kubeconfig("scheduler", &control_plane);
+
+        // Generate node kubeconfigs
+        for (i, node) in worker_nodes.iter().enumerate() {
+            let node_name = format!("node-{}", i + 1);
+            let credential_name = format!("system:node:worker-node-{}", i + 1);
+            {
+                let generator = self.kubeconfig_generator.as_ref().unwrap();
+                generator.generate_kubeconfig(&node_name, &credential_name)?;
+            }
+            self.track_kubeconfig(&node_name, node);
+        }
+
+        self.log("Kubeconfig generation completed successfully");
+        Ok(())
+    }
+
+    pub fn generate_encryption_config(&mut self) -> io::Result<()> {
+        self.set_current_operation("Generating Encryption Config");
+        self.log("Starting encryption config generation...");
+
+        // Initialize generator if needed
+        if self.encryption_generator.is_none() {
+            self.init_generators();
+        }
+
+        let generator = self.encryption_generator.as_ref().unwrap();
+        generator.generate_config()?;
+
+        // Track the encryption config for distribution
+        self.cert_tracker.add_certificate(
+            "encryption-config",
+            "encryption-config.yaml",
+            vec![self.config.control_plane.clone()],
+        );
+
+        self.log("Encryption config generated successfully");
+        Ok(())
     }
 
     fn create_certificate_operations(&self) -> io::Result<CertificateOperations> {
@@ -112,6 +358,22 @@ impl CertManager {
             self.config.remote_user.clone(),
             self.config.ssh_key_path.clone(),
         ))
+    }
+
+    pub fn open_web_ui(&mut self) {
+        // Create a smaller scope for the web_state read lock
+        let url = {
+            let web_state = self.web_state.read().unwrap();
+            if !web_state.is_running {
+                return;
+            }
+            format!("http://localhost:{}", web_state.port)
+        }; // web_state read guard is dropped here
+
+        // Now we can mutably borrow self for logging
+        if let Err(e) = open::that(&url) {
+            self.log(&format!("Failed to open browser: {}", e));
+        }
     }
 
     pub fn get_cert_ops(&mut self) -> &mut CertificateOperations {
@@ -158,12 +420,19 @@ impl CertManager {
         self.generate_service_account_keys()?;
 
         // 7. Generate Kubeconfigs
-        self.generate_kubeconfigs()?;
+        self.generate_all_kubeconfigs()?;
 
         // 8. Generate Encryption Config
         self.generate_encryption_config()?;
 
-        self.log("Certificate generation and distribution completed successfully!");
+        // Distribute everything at once
+        self.confirmation_dialog = Some(ConfirmationDialog {
+            message: "Do you want to distribute all generated certificates and configs?"
+                .to_string(),
+            callback: ConfirmationCallback::DistributePending,
+        });
+        self.mode = AppMode::Confirmation;
+
         Ok(())
     }
 
@@ -207,33 +476,33 @@ impl CertManager {
                 // Add certificates to tracker
                 self.cert_tracker.add_certificate(
                     "root-ca",
-                    "certs/root-ca/ca.crt",
+                    "root-ca/ca.crt",
                     // vec![self.config.control_plane.clone()],
-                    hosts.clone()
+                    hosts.clone(),
                 );
                 self.cert_tracker.add_certificate(
                     "kubernetes-ca",
-                    "certs/kubernetes-ca/ca.crt",
+                    "kubernetes-ca/ca.crt",
                     // vec![self.config.control_plane.clone()],
-                    hosts.clone()
+                    hosts.clone(),
                 );
                 self.cert_tracker.add_certificate(
                     "ca-chain",
-                    "certs/kubernetes-ca/ca-chain.crt",
+                    "kubernetes-ca/ca-chain.crt",
                     // vec![self.config.control_plane.clone()],
-                    hosts.clone()
+                    hosts.clone(),
                 );
 
                 self.cert_tracker.mark_verified("root-ca", true);
                 self.cert_tracker.mark_verified("kubernetes-ca", true);
                 self.cert_tracker.mark_verified("ca-chain", true);
 
-                // Add confirmation dialog for distributing CA chain
-                // self.confirmation_dialog = Some(ConfirmationDialog {
-                //     message: "Do you want to distribute the CA chain to all hosts?".to_string(),
-                //     callback: ConfirmationCallback::CAChain,
-                // });
-                // self.mode = AppMode::Confirmation;
+                // Optional Add confirmation dialog for distributing CA chain
+                self.confirmation_dialog = Some(ConfirmationDialog {
+                    message: "Do you want to distribute the generated CA certificates?".to_string(),
+                    callback: ConfirmationCallback::DistributePending,
+                });
+                self.mode = AppMode::Confirmation;
 
                 Ok(())
             }
@@ -732,61 +1001,6 @@ impl CertManager {
         Ok(())
     }
 
-    pub fn generate_kubeconfigs(&mut self) -> io::Result<()> {
-        self.log("Generating kubeconfigs...");
-
-        // Define all the kubeconfig configurations
-        let configs = [
-            ("admin", "default-admin"),
-            ("controller-manager", "system:kube-controller-manager"),
-            ("scheduler", "system:kube-scheduler"),
-        ];
-
-        // Generate kubeconfigs for control plane components
-        for (config_name, credential_name) in configs.iter() {
-            self.generate_kubeconfig(config_name, credential_name)?;
-        }
-
-        // Generate kubeconfigs for worker nodes
-        for (i, _node) in self.config.worker_nodes.clone().iter().enumerate() {
-            let node_name = format!("node-{}", i + 1);
-            let credential_name = format!("system:node:{}", node_name);
-            self.generate_kubeconfig(&node_name, &credential_name)?;
-        }
-
-        // Distribute all kubeconfigs
-        self.distribute_kubeconfigs()?;
-
-        self.log("Kubeconfig generation and distribution completed");
-        Ok(())
-    }
-
-    fn distribute_kubeconfigs(&mut self) -> io::Result<()> {
-        self.log("Distributing kubeconfig files...");
-        let mut cert_ops = self.create_certificate_operations()?;
-
-        // Distribute admin kubeconfig to control plane
-        cert_ops.copy_to_k8s_paths("kubeconfig/admin.conf", &self.config.control_plane)?;
-
-        // Distribute worker kubeconfigs
-        for (i, node) in self.config.worker_nodes.iter().enumerate() {
-            let node_config = format!("kubeconfig/node-{}.conf", i + 1);
-            cert_ops.copy_to_k8s_paths(&node_config, node)?;
-        }
-
-        // Distribute controller-manager kubeconfig
-        cert_ops.copy_to_k8s_paths(
-            "kubeconfig/controller-manager.conf",
-            &self.config.control_plane,
-        )?;
-
-        // Distribute scheduler kubeconfig
-        cert_ops.copy_to_k8s_paths("kubeconfig/scheduler.conf", &self.config.control_plane)?;
-
-        self.log("Kubeconfig distribution completed");
-        Ok(())
-    }
-
     fn execute_kubectl_command(&self, args: &[&str]) -> io::Result<()> {
         let output = Command::new("kubectl").args(args).output()?;
 
@@ -800,32 +1014,6 @@ impl CertManager {
             ));
         }
 
-        Ok(())
-    }
-
-    pub fn generate_encryption_config(&mut self) -> io::Result<()> {
-        self.log("Generating encryption config...");
-        let mut cert_ops = self.create_certificate_operations()?;
-
-        // Generate random encryption key
-        let encryption_key = self.generate_random_key(32)?;
-        let config = self.create_encryption_config(&encryption_key)?;
-
-        // Write config to file
-        let config_path = PathBuf::from("encryption-config.yaml");
-        fs::write(&config_path, config)?;
-
-        // Distribute to control plane using cert_ops
-        cert_ops.copy_to_k8s_paths("encryption-config", &self.config.control_plane)?;
-
-        // // Distribute to control plane
-        // cert_ops.copy_with_sudo(
-        //     config_path.to_str().unwrap(),
-        //     &format!("{}/encryption-config.yaml", self.config.remote_dir),
-        //     &self.config.control_plane,
-        // )?;
-
-        self.log("Encryption config generated and distributed");
         Ok(())
     }
 
@@ -908,10 +1096,11 @@ resources:
             match dialog.callback {
                 ConfirmationCallback::RootCA => {
                     if confirmed {
-                        // let mut cert_ops = self.create_certificate_operations()?;
                         let control_plane = self.config.control_plane.clone();
 
-                        if let Err(e) = cert_ops.copy_to_k8s_paths("kubernetes", &control_plane) {
+                        if let Err(e) =
+                            cert_ops.copy_to_k8s_paths("certs/root-ca/ca.crt", &control_plane)
+                        {
                             self.log(&format!("Failed to distribute Root CA certificates: {}", e));
                         } else {
                             self.log("Root CA certificates distributed successfully");
@@ -931,13 +1120,14 @@ resources:
                 }
                 ConfirmationCallback::KubernetesCA => {
                     if confirmed {
-                        // let cert_ops = self.create_certificate_operations()?;
                         let all_hosts = self.get_all_hosts();
                         let mut success = true;
 
                         self.cert_tracker.mark_verified("Kubernetes CA", false);
                         for host in &all_hosts {
-                            if let Err(e) = cert_ops.copy_to_k8s_paths("kubernetes", host) {
+                            if let Err(e) =
+                                cert_ops.copy_to_k8s_paths("certs/kubernetes-ca/ca.crt", host)
+                            {
                                 self.log(&format!(
                                     "Failed to distribute Kubernetes CA certificates to {}: {}",
                                     host, e
@@ -959,20 +1149,25 @@ resources:
                 ConfirmationCallback::CAChain => {
                     if confirmed {
                         let hosts = self.get_all_hosts();
-                        match self
-                            .get_cert_ops()
-                            .distribute_certificates("kubernetes-ca", &hosts)
-                        {
-                            Ok(_) => {
-                                self.log(
-                                    "CA chain certificates created and distributed successfully",
-                                );
-                                self.cert_tracker.mark_distributed("ca-chain")
+                        let mut success = true;
+
+                        for host in &hosts {
+                            if let Err(e) =
+                                cert_ops.copy_to_k8s_paths("certs/kubernetes-ca/ca-chain.crt", host)
+                            {
+                                self.log(&format!(
+                                    "Failed to distribute CA chain certificates to {}: {}",
+                                    host, e
+                                ));
+                                success = false;
                             }
-                            Err(e) => self.log(&format!(
-                                "Failed to create and distribute CA chain certificates: {}",
-                                e
-                            )),
+                        }
+
+                        if success {
+                            self.log("CA chain certificates created and distributed successfully");
+                            self.cert_tracker.mark_distributed("ca-chain");
+                        } else {
+                            self.log("Failed to distribute some CA chain certificates");
                         }
                     } else {
                         self.log("CA chain certificate distribution was canceled by the user.");
@@ -990,22 +1185,18 @@ resources:
                         self.log("Automation cancelled by user");
                     }
                 }
-
                 ConfirmationCallback::VerifyChains => {
                     if confirmed {
                         self.log("Starting verification of distributed certificates...");
                         match self.verify_certificates() {
                             Ok(_) => self.log("Remote verification successful, trust is complete."),
-                            Err(e) => self.log(&format!("Automation failed: {}", e)),
+                            Err(e) => self.log(&format!("Verification failed: {}", e)),
                         }
                     }
                 }
-
                 ConfirmationCallback::DistributePending => {
                     if confirmed {
                         self.mode = AppMode::Normal;
-                        let mut cert_ops = self.create_certificate_operations()?;
-                        // Get the data we need first
                         let pending_certs: Vec<(String, String, Vec<String>)> = self
                             .cert_tracker
                             .get_undistributed()
@@ -1023,7 +1214,7 @@ resources:
                         if pending_certs.is_empty() {
                             self.log("No certificates pending distribution");
                         } else {
-                            for (cert_type, _, hosts) in pending_certs {
+                            for (cert_type, path, hosts) in pending_certs {
                                 self.log(&format!("Distributing {} certificate...", cert_type));
 
                                 let mut cert_success = true;
@@ -1033,17 +1224,25 @@ resources:
                                 }
 
                                 for host in hosts {
-                                    self.log(&format!("{}", host));
-                                    match cert_ops.copy_to_k8s_paths(&cert_type, &host) {
+                                    self.log(&format!("Distributing to host: {}", host));
+                                    let source_path = if cert_type.starts_with("kubeconfig-") {
+                                        format!("kubeconfig/{}", path)
+                                    } else if cert_type == "encryption-config" {
+                                        "encryption-config.yaml".to_string()
+                                    } else {
+                                        format!("certs/{}", path)
+                                    };
+
+                                    match cert_ops.copy_to_k8s_paths(&source_path, &host) {
                                         Ok(_) => {
                                             self.log(&format!(
-                                                "Successfully distributed {} certificate to {}",
+                                                "Successfully distributed {} to {}",
                                                 cert_type, host
                                             ));
                                         }
                                         Err(e) => {
                                             self.log(&format!(
-                                                "Failed to distribute {} certificate to {}: {}",
+                                                "Failed to distribute {} to {}: {}",
                                                 cert_type, host, e
                                             ));
                                             cert_success = false;
