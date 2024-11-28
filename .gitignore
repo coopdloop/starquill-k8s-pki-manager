@@ -15,13 +15,12 @@ Cargo.lock
 *.pdb
 
 # App specific
-certs/
-kubeconfig/
+/certs/
+/kubeconfig/
 cluster_config.json
 certificate_status.json
-web_server.log
 
 # Web App specific
-webapp/dist/
-webapp/node_modules/
-webapp/.env
+dist
+node_modules
+.env
