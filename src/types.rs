@@ -2,6 +2,7 @@
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -19,7 +20,6 @@ pub struct Args {
 pub enum AppMode {
     Normal,
     EditConfig,
-    ViewLogs,
     Confirmation,
 }
 
@@ -124,4 +124,63 @@ impl CertTracker {
             .filter(|cert|!cert.cert_type.contains("root-ca"))
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ActiveSection {
+    Menu,
+    CertStatus,
+    Logs,
+    TrustInfo,
+}
+
+impl ActiveSection {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Menu => Self::CertStatus,
+            Self::CertStatus => Self::Logs,
+            Self::Logs => Self::TrustInfo,
+            Self::TrustInfo => Self::Menu,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Menu => Self::TrustInfo,
+            Self::CertStatus => Self::Menu,
+            Self::Logs => Self::CertStatus,
+            Self::TrustInfo => Self::Logs,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ControlPlaneMetrics {
+    pub etcd: EtcdMetrics,
+    pub api_server: ApiServerMetrics,
+    pub scheduler: SchedulerMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct EtcdMetrics {
+    pub db_size: String,
+    pub active_connections: i32,
+    pub operations_per_second: i32,
+    pub latency_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ApiServerMetrics {
+    pub goroutines: i32,
+    pub requests_per_second: i32,
+    pub request_latency_ms: f64,
+    pub active_watches: i32,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SchedulerMetrics {
+    pub active_workers: i32,
+    pub scheduling_latency_ms: f64,
+    pub pending_pods: i32,
 }

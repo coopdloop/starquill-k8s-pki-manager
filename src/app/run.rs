@@ -1,5 +1,7 @@
 use super::CertManager;
-use crate::types::{AppMode, ConfirmationCallback, ConfirmationDialog, ScrollDirection};
+use crate::types::{
+    ActiveSection, AppMode, ConfirmationCallback, ConfirmationDialog, ScrollDirection,
+};
 use crate::ui;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -9,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run_app(
+pub async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     cert_manager: Arc<RwLock<CertManager>>,
 ) -> io::Result<()> {
@@ -34,45 +36,126 @@ pub fn run_app(
                 let mut manager = cert_manager.write().unwrap();
 
                 match manager.mode {
-                    AppMode::ViewLogs => match key.code {
-                        KeyCode::Esc => {
-                            manager.mode = AppMode::Normal;
-                        }
-                        KeyCode::Up => {
-                            manager.scroll_logs(ScrollDirection::Up);
-                        }
-                        KeyCode::Down => {
-                            manager.scroll_logs(ScrollDirection::Down);
-                        }
-                        KeyCode::PageUp => {
-                            manager.scroll_logs(ScrollDirection::PageUp);
-                        }
-                        KeyCode::PageDown => {
-                            manager.scroll_logs(ScrollDirection::PageDown);
-                        }
-                        KeyCode::Home => {
-                            manager.scroll_logs(ScrollDirection::Top);
-                        }
-                        KeyCode::End => {
-                            manager.scroll_logs(ScrollDirection::Bottom);
-                        }
-                        _ => {}
-                    },
                     AppMode::Normal => match key.code {
                         KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Char('l') | KeyCode::Char('L') => {
-                            manager.mode = AppMode::ViewLogs;
+                        KeyCode::Up => match manager.active_section {
+                            ActiveSection::Menu => {
+                                manager.selected_menu = manager
+                                    .selected_menu
+                                    .checked_sub(1)
+                                    .unwrap_or(manager.menu_items.len() - 1);
+
+                                // Handle wrap-around scrolling for menu
+                                let visible_height = 16;
+                                if manager.selected_menu == manager.menu_items.len() - 1 {
+                                    manager.menu_scroll =
+                                        manager.menu_items.len().saturating_sub(visible_height);
+                                } else if manager.selected_menu < manager.menu_scroll {
+                                    manager.menu_scroll = manager.selected_menu;
+                                }
+                            }
+                            ActiveSection::CertStatus => {
+                                if manager.cert_status_scroll > 0 {
+                                    manager.cert_status_scroll -= 1;
+                                }
+                            }
+                            ActiveSection::Logs => {
+                                manager.scroll_logs(ScrollDirection::Up);
+                            }
+                            ActiveSection::TrustInfo => {
+                                if manager.trust_info_scroll > 0 {
+                                    manager.trust_info_scroll -= 1;
+                                }
+                            }
+                        },
+                        KeyCode::Down => match manager.active_section {
+                            ActiveSection::Menu => {
+                                let prev_selected = manager.selected_menu;
+                                manager.selected_menu =
+                                    (manager.selected_menu + 1) % manager.menu_items.len();
+
+                                let visible_height = 16;
+                                if prev_selected > manager.selected_menu {
+                                    manager.menu_scroll = 0;
+                                } else if manager.selected_menu
+                                    >= manager.menu_scroll + visible_height
+                                {
+                                    manager.menu_scroll =
+                                        manager.selected_menu.saturating_sub(visible_height - 1);
+                                }
+                            }
+                            ActiveSection::CertStatus => {
+                                let max_scroll =
+                                    manager.cert_tracker.certificates.len().saturating_sub(10);
+                                if manager.cert_status_scroll < max_scroll {
+                                    manager.cert_status_scroll += 1;
+                                }
+                            }
+                            ActiveSection::Logs => {
+                                manager.scroll_logs(ScrollDirection::Down);
+                            }
+                            ActiveSection::TrustInfo => {
+                                if let Some(store) = &manager.trust_store {
+                                    let max_scroll = store.len().saturating_sub(8);
+                                    if manager.trust_info_scroll < max_scroll {
+                                        manager.trust_info_scroll += 1;
+                                    }
+                                }
+                            }
+                        },
+                        KeyCode::Left => {
+                            // Navigate between sections
+                            manager.active_section = manager.active_section.prev();
                         }
-                        KeyCode::Up => {
-                            manager.selected_menu = manager
-                                .selected_menu
-                                .checked_sub(1)
-                                .unwrap_or(manager.menu_items.len() - 1);
+                        KeyCode::Right => {
+                            // Navigate between sections
+                            manager.active_section = manager.active_section.next();
                         }
-                        KeyCode::Down => {
-                            manager.selected_menu =
-                                (manager.selected_menu + 1) % manager.menu_items.len();
-                        }
+                        // Add scrolling for other sections when they're active
+                        KeyCode::PageUp => match manager.active_section {
+                            ActiveSection::Menu => {
+                                manager.menu_scroll = manager.menu_scroll.saturating_sub(10);
+                                manager.selected_menu = manager.selected_menu.saturating_sub(10);
+                            }
+                            ActiveSection::CertStatus => {
+                                manager.cert_status_scroll =
+                                    manager.cert_status_scroll.saturating_sub(10);
+                            }
+                            ActiveSection::Logs => {
+                                manager.scroll_logs(ScrollDirection::PageUp);
+                            }
+                            ActiveSection::TrustInfo => {
+                                manager.trust_info_scroll =
+                                    manager.trust_info_scroll.saturating_sub(10);
+                            }
+                        },
+                        KeyCode::PageDown => match manager.active_section {
+                            ActiveSection::Menu => {
+                                let max_scroll = manager.menu_items.len().saturating_sub(16);
+                                manager.menu_scroll = (manager.menu_scroll + 10).min(max_scroll);
+                                manager.selected_menu =
+                                    (manager.selected_menu + 10).min(manager.menu_items.len() - 1);
+                            }
+                            ActiveSection::CertStatus => {
+                                let max_scroll =
+                                    manager.cert_tracker.certificates.len().saturating_sub(10);
+                                manager.cert_status_scroll =
+                                    (manager.cert_status_scroll + 10).min(max_scroll);
+                            }
+                            ActiveSection::Logs => {
+                                manager.scroll_logs(ScrollDirection::PageDown);
+                            }
+                            ActiveSection::TrustInfo => {
+                                let max_scroll = manager
+                                    .trust_store
+                                    .as_ref()
+                                    .map(|s| s.len())
+                                    .unwrap_or(0)
+                                    .saturating_sub(8);
+                                manager.trust_info_scroll =
+                                    (manager.trust_info_scroll + 10).min(max_scroll);
+                            }
+                        },
                         KeyCode::Char('o') => {
                             if key.modifiers == KeyModifiers::NONE {
                                 manager.open_web_ui();
@@ -205,6 +288,15 @@ pub fn run_app(
                                 }
                             }
                             14 => {
+                                // Import Existing Certificates
+                                if let Err(e) = manager.import_existing_certificates().await {
+                                    manager.log(&format!(
+                                        "Failed to import existing certificates: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            15 => {
                                 // Automate all
                                 manager.confirmation_dialog = Some(ConfirmationDialog {
                                     message: "Do you want to automatically generate and distribute all certificates?".to_string(),

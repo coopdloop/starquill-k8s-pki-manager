@@ -13,47 +13,47 @@ import VisualizationContainer from './VisualizationContainer';
 const API_PORT = import.meta.env.VITE_API_PORT || 3000
 const API_URL = `http://localhost:${API_PORT}/api/cluster`
 
-type Node = {
-    x: number;
-    y: number;
-    ip: string;
-}
+// type Node = {
+//     x: number;
+//     y: number;
+//     ip: string;
+// }
 
-type NodesState = {
-    controlPlane: Node;
-    workers: (Node & { id: string })[];
-} | null;
-
-type Certificate = {
-    status: 'Distributed' | 'Generated';
-    cert_type: string;
-    last_updated?: string;
-}
-
-type ClusterData = {
-    control_plane: {
-        ip: string;
-        certs: Certificate[];
-    };
-    workers: Array<{
-        ip: string;
-        certs?: Certificate[];
-    }>;
-} | null;
-
-type ActivityItem = {
-    type: 'success' | 'warning' | 'info';
-    message: string;
-    timestamp: string;
-};
+// type NodesState = {
+//     controlPlane: Node;
+//     workers: (Node & { id: string })[];
+// } | null;
+//
+// type Certificate = {
+//     status: 'Distributed' | 'Generated';
+//     cert_type: string;
+//     last_updated?: string;
+// }
+//
+// type ClusterData = {
+//     control_plane: {
+//         ip: string;
+//         certs: Certificate[];
+//     };
+//     workers: Array<{
+//         ip: string;
+//         certs?: Certificate[];
+//     }>;
+// } | null;
+//
+// type ActivityItem = {
+//     type: 'success' | 'warning' | 'info';
+//     message: string;
+//     timestamp: string;
+// };
 
 export const ClusterVisualization = () => {
-    const [clusterData, setClusterData] = useState<ClusterData>(null);
-    const [nodes, setNodes] = useState<NodesState>(null);
+    const [clusterData, setClusterData] = useState(null);
+    const [nodes, setNodes] = useState(null);
     const [draggedNode, setDraggedNode] = useState(null);
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-    const [hoveredNode, setHoveredNode] = useState<string | 'control' | null>(null);
-    const [selectedNode, setSelectedNode] = useState<string | null>(null);
+    const [hoveredNode, setHoveredNode] = useState(null);
+    const [selectedNode, setSelectedNode] = useState(null);
     const [showNotification, setShowNotification] = useState(false);
     const [notificationType, setNotificationType] = useState('success');
     const [notificationMessage, setNotificationMessage] = useState('');
@@ -62,7 +62,7 @@ export const ClusterVisualization = () => {
         height: 0,
     });
 
-    const activityItems: ActivityItem[] = [
+    const activityItems = [
         { type: 'success', message: 'Control plane certificates distributed', timestamp: '2m ago' },
         { type: 'warning', message: 'Worker node certificate pending', timestamp: '5m ago' },
         { type: 'info', message: 'Started certificate generation', timestamp: '10m ago' },
@@ -144,45 +144,45 @@ export const ClusterVisualization = () => {
     }, [nodes, containerBounds]);
 
     // Separate connection line component for better organization
-    const ConnectionLines = React.memo(({ nodes }: { nodes: NodesState }) => {
-        if (!nodes?.controlPlane || !nodes?.workers) return null;
-
-        return (
-            <svg className="absolute inset-0"
-                style={{ zIndex: 0 }}
-                width="100%"
-                height="100%"
-                preserveAspectRatio="none"
-            >
-                {nodes.workers.map(worker => (
-                    <g key={worker.id}>
-                        <defs>
-                            <linearGradient
-                                id={`line-gradient-${worker.id}`}
-                                gradientUnits="userSpaceOnUse"
-                                x1={nodes.controlPlane.x}
-                                y1={nodes.controlPlane.y}
-                                x2={worker.x}
-                                y2={worker.y}
-                            >
-                                <stop offset="0%" stopColor="#4f46e5" />
-                                <stop offset="100%" stopColor="#06b6d4" />
-                            </linearGradient>
-                        </defs>
-                        <line
-                            x1={nodes.controlPlane.x}
-                            y1={nodes.controlPlane.y}
-                            x2={worker.x}
-                            y2={worker.y}
-                            stroke={`url(#line-gradient-${worker.id})`}
-                            strokeWidth="2"
-                            className="animate-pulse"
-                        />
-                    </g>
-                ))}
-            </svg>
-        );
-    });
+    // const ConnectionLines = React.memo(({ nodes }: { nodes: NodesState }) => {
+    //     if (!nodes?.controlPlane || !nodes?.workers) return null;
+    //
+    //     return (
+    //         <svg className="absolute inset-0"
+    //             style={{ zIndex: 0 }}
+    //             width="100%"
+    //             height="100%"
+    //             preserveAspectRatio="none"
+    //         >
+    //             {nodes.workers.map(worker => (
+    //                 <g key={worker.id}>
+    //                     <defs>
+    //                         <linearGradient
+    //                             id={`line-gradient-${worker.id}`}
+    //                             gradientUnits="userSpaceOnUse"
+    //                             x1={nodes.controlPlane.x}
+    //                             y1={nodes.controlPlane.y}
+    //                             x2={worker.x}
+    //                             y2={worker.y}
+    //                         >
+    //                             <stop offset="0%" stopColor="#4f46e5" />
+    //                             <stop offset="100%" stopColor="#06b6d4" />
+    //                         </linearGradient>
+    //                     </defs>
+    //                     <line
+    //                         x1={nodes.controlPlane.x}
+    //                         y1={nodes.controlPlane.y}
+    //                         x2={worker.x}
+    //                         y2={worker.y}
+    //                         stroke={`url(#line-gradient-${worker.id})`}
+    //                         strokeWidth="2"
+    //                         className="animate-pulse"
+    //                     />
+    //                 </g>
+    //             ))}
+    //         </svg>
+    //     );
+    // });
 
     useEffect(() => {
         document.addEventListener('mousemove', handleMouseMove);
@@ -238,24 +238,24 @@ export const ClusterVisualization = () => {
     // Add debug logging
     console.log('Cluster Data:', clusterData);
 
-    const handleDragStart = (
-        e: React.MouseEvent,
-        nodeType: 'control' | 'worker',
-        workerId: string | null = null
-    ) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        const bounds = e.currentTarget.getBoundingClientRect();
-        setDraggedNode({
-            type: nodeType,
-            id: workerId || 'control'  // Ensure control plane has an id
-        });
-        setDragOffset({
-            x: e.clientX - bounds.left,
-            y: e.clientY - bounds.top
-        });
-    };
+    // const handleDragStart = (
+    //     e: React.MouseEvent,
+    //     nodeType: 'control' | 'worker',
+    //     workerId: string | null = null
+    // ) => {
+    //     e.preventDefault();
+    //     e.stopPropagation();
+    //
+    //     const bounds = e.currentTarget.getBoundingClientRect();
+    //     setDraggedNode({
+    //         type: nodeType,
+    //         id: workerId || 'control'  // Ensure control plane has an id
+    //     });
+    //     setDragOffset({
+    //         x: e.clientX - bounds.left,
+    //         y: e.clientY - bounds.top
+    //     });
+    // };
 
     const arrangeInCircle = (containerBounds) => {
         const totalWorkers = clusterData.workers.length;
@@ -390,7 +390,7 @@ export const ClusterVisualization = () => {
     return (
         <div className="flex flex-col gap-4" >
             {/* Main container */}
-            <div className="grid grid-cols-12 gap-6">
+            <div >
                 {/* Left side - Visualization */}
                 <div className="col-span-8">
                     <VisualizationContainer nodes={nodes} clusterData={clusterData} onRearrange={handleRearrange} setNodes={setNodes} />
@@ -460,6 +460,7 @@ export const ClusterVisualization = () => {
                         ))}
                     </div>
                 </div>
+
             </div>
 
             {/* Modals */}

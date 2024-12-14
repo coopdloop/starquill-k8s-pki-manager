@@ -9,7 +9,7 @@ export const Layout = () => (  // Remove the children prop
     <Sidebar />
     <div className="flex-1 flex flex-col">
       <Header />
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-6 z-20">
         <Outlet /> {/* Replace {children} with <Outlet /> */}
       </main>
     </div>

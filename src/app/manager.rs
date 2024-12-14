@@ -6,15 +6,16 @@ use crate::cert::{
     ServiceAccountGenerator,
 };
 use crate::config::{ClusterConfig, ConfigEditor};
+use crate::discovery::{CertificateDiscovery, CertificateInfo, NodeTrustInfo};
 use crate::kubeconfig::{EncryptionConfigGenerator, KubeConfigGenerator};
-use crate::track_lock_count;
+use crate::metrics::MetricsCollector;
 use crate::types::{
-    AppMode, CertTracker, ConfirmationCallback, ConfirmationDialog, ScrollDirection,
+    ActiveSection, AppMode, CertTracker, ConfirmationCallback, ConfirmationDialog, ScrollDirection,
 };
+use crate::ui;
 use crate::utils::logging::Logger;
 use crate::web::WebServerState;
 
-use base64::{engine::general_purpose, Engine as _};
 use chrono::Local;
 use crossterm::event::KeyCode;
 use glob::glob;
@@ -23,6 +24,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, RwLock};
@@ -40,16 +42,23 @@ pub struct CertManager {
     pub config_editor: ConfigEditor,
     pub debug: bool,
     pub log_scroll: usize,
+    pub menu_scroll: usize,
+    pub cert_status_scroll: usize,
+    pub trust_info_scroll: usize,
+    pub active_section: ActiveSection,
     pub confirmation_dialog: Option<ConfirmationDialog>,
     pub cert_tracker: CertTracker,
     pub web_state: Arc<RwLock<WebServerState>>,
     cert_ops: Option<CertificateOperations>,
+    pub metrics_collector: Option<MetricsCollector>,
+    pub metrics_enabled: bool,
     // log_receiver: Receiver<String>,
     // log_sender: Sender<String>,
     log_receiver: tokio::sync::mpsc::Receiver<String>,
     log_sender: tokio::sync::mpsc::Sender<String>,
     pub kubeconfig_generator: Option<KubeConfigGenerator>,
     pub encryption_generator: Option<EncryptionConfigGenerator>,
+    pub trust_store: Option<HashMap<String, NodeTrustInfo>>,
 }
 
 #[derive(Clone)]
@@ -81,6 +90,15 @@ pub struct ClusterInfo {
     #[schema(example = "Control Plane Node")]
     pub control_plane: NodeInfo,
     pub workers: Vec<NodeInfo>,
+    pub connectivity: ConnectivityStatus,
+}
+
+#[derive(Clone, Serialize, ToSchema)]
+pub struct ConnectivityStatus {
+    pub unreachable_nodes: Vec<String>,
+    pub last_checked: String,
+    pub total_nodes: usize,
+    pub available_nodes: usize,
 }
 
 #[derive(Clone, Serialize, ToSchema)]
@@ -139,20 +157,27 @@ impl CertManager {
             config_editor: ConfigEditor::new(&ClusterConfig::default()),
             debug: false,
             log_scroll: 0,
+            menu_scroll: 0,
+            cert_status_scroll: 0,
+            trust_info_scroll: 0,
+            active_section: ActiveSection::Menu,
             confirmation_dialog: None,
             cert_tracker: CertTracker::new(),
             web_state: Arc::default(),
             cert_ops: None,
+            metrics_collector: None,
+            metrics_enabled: false,
             log_receiver: receiver,
             log_sender: sender,
             kubeconfig_generator: None,
             encryption_generator: None,
+            trust_store: None,
         }
     }
 
     pub fn new(config: ClusterConfig, debug: bool, web_state: Arc<RwLock<WebServerState>>) -> Self {
-        track_lock_count(1, "CertManager::new:start");
         let (sender, receiver) = tokio::sync::mpsc::channel(100);
+
         let mut manager = Self {
             config_editor: ConfigEditor::new(&config),
             config,
@@ -174,23 +199,44 @@ impl CertManager {
                 "Exit".to_string(),
                 "Distribute Pending Certificates".to_string(),
                 "Save Certificate Status".to_string(),
+                "Import Existing Certificates".to_string(), // Discover
                 "Automate all".to_string(),
             ],
             mode: AppMode::Normal,
             debug,
             log_scroll: 0,
+            menu_scroll: 0,
+            cert_status_scroll: 0,
+            trust_info_scroll: 0,
+            active_section: ActiveSection::Menu,
             confirmation_dialog: None,
             cert_tracker: CertTracker::new(),
             web_state,
             cert_ops: None,
+            metrics_collector: None,
+            metrics_enabled: false,
             log_receiver: receiver,
             log_sender: sender,
             kubeconfig_generator: None,
             encryption_generator: None,
+            trust_store: None,
         };
         manager.init_cert_ops();
-        track_lock_count(-1, "CertManager::new:end");
         manager
+    }
+
+    // Init and validate automatic
+    pub async fn initialize(&mut self) -> io::Result<()> {
+        // Auto-discover existing certificates
+        match self.import_existing_certificates().await {
+            Ok(_) => self.log("Attempted import of existing certificates"),
+            Err(e) => self.log(&format!("Certificate import failed: {}", e)),
+        }
+
+        let discovery = CertificateDiscovery::new();
+        self.trust_store = Some(discovery.get_trust_store_contents().await);
+
+        Ok(())
     }
 
     // Add initialization method for generators
@@ -214,68 +260,14 @@ impl CertManager {
         );
     }
 
-    pub async fn get_cluster_info(&self) -> ClusterInfo {
-        let control_certs = self
-            .cert_tracker
-            .certificates
-            .iter()
-            .filter(|c| c.hosts.contains(&self.config.control_plane))
-            .map(|c| CertStatus {
-                cert_type: c.cert_type.clone(),
-                status: if c.distributed.is_some() {
-                    "Distributed".into()
-                } else {
-                    "Generated".into()
-                },
-                // last_updated: c.distributed.or(Some(c.generated)),
-                last_updated: c
-                    .distributed
-                    .or(Some(c.generated))
-                    .map(|dt| dt.to_rfc3339()),
-            })
-            .collect();
+    pub fn enable_metrics(&mut self, kubeconfig_path: String) {
+        self.metrics_enabled = true;
+        self.metrics_collector = Some(MetricsCollector::new(true, kubeconfig_path));
+    }
 
-        let control_plane = NodeInfo {
-            ip: self.config.control_plane.clone(),
-            certs: control_certs,
-        };
-
-        let workers = self
-            .config
-            .worker_nodes
-            .iter()
-            .map(|ip| {
-                let node_certs = self
-                    .cert_tracker
-                    .certificates
-                    .iter()
-                    .filter(|c| c.hosts.contains(ip))
-                    .map(|c| CertStatus {
-                        cert_type: c.cert_type.clone(),
-                        status: if c.distributed.is_some() {
-                            "Distributed".into()
-                        } else {
-                            "Generated".into()
-                        },
-                        // last_updated: c.distributed.or(Some(c.generated)),
-                        last_updated: c
-                            .distributed
-                            .or(Some(c.generated))
-                            .map(|dt| dt.to_rfc3339()),
-                    })
-                    .collect();
-
-                NodeInfo {
-                    ip: ip.clone(),
-                    certs: node_certs,
-                }
-            })
-            .collect();
-
-        ClusterInfo {
-            control_plane,
-            workers,
-        }
+    pub fn disable_metrics(&mut self) {
+        self.metrics_enabled = false;
+        self.metrics_collector = None;
     }
 
     pub fn generate_all_kubeconfigs(&mut self) -> io::Result<()> {
@@ -545,7 +537,7 @@ impl CertManager {
         self.create_kubernetes_ca_chain()?;
 
         self.cert_tracker.add_certificate(
-            "Kubernetes CA",
+            "kubernetes-ca",
             "certs/kubernetes-ca/ca.crt",
             vec![self.config.control_plane.clone()],
         );
@@ -636,8 +628,8 @@ impl CertManager {
         // Mark as verified and distributed
         self.cert_tracker.mark_verified("SA Public Key", true);
         self.cert_tracker.mark_verified("SA Private Key", true);
-        self.cert_tracker.mark_distributed("SA Public Key");
-        self.cert_tracker.mark_distributed("SA Private Key");
+        // self.cert_tracker.mark_distributed("SA Public Key");
+        // self.cert_tracker.mark_distributed("SA Private Key");
 
         Ok(())
     }
@@ -720,108 +712,72 @@ impl CertManager {
 
         let mut verifier = CertificateVerifier::new(
             Box::new(OperationsLogger::new(self.log_sender.clone(), self.debug)),
-            // Box::new(self.clone()),
             self.config.remote_user.clone(),
             self.config.remote_dir.clone(),
             self.config.ssh_key_path.clone(),
         );
 
-        // Verify local certificates
-        let ca_chain_path = "certs/kubernetes-ca/ca-chain.crt";
-        let certificates = [
-            ("Root CA", "certs/root-ca/ca.crt", None),
-            (
-                "Kubernetes CA",
-                "certs/kubernetes-ca/ca.crt",
-                Some("certs/root-ca/ca.crt"),
-            ),
-            (
-                "API Server",
-                "certs/kube-apiserver/kube-apiserver.crt",
-                Some(ca_chain_path),
-            ),
-            (
-                "Controller Manager",
-                "certs/controller-manager/controller-manager.crt",
-                Some(ca_chain_path),
-            ),
-            (
-                "Scheduler",
-                "certs/scheduler/scheduler.crt",
-                Some(ca_chain_path),
-            ),
-        ];
+        // Clone the certificates to avoid borrowing issues
+        let certificates = self.cert_tracker.certificates.clone();
 
-        for (name, path, ca_cert) in certificates {
-            if Path::new(path).exists() {
-                match verifier.verify_certificate(path, ca_cert) {
-                    Ok(_) => {
-                        self.cert_tracker.mark_verified(name, true);
-                        self.log(&format!("{} verified successfully", name));
-                    }
-                    Err(e) => {
-                        self.cert_tracker.mark_verified(name, false);
-                        self.log(&format!("{} verification failed: {}", name, e));
-                    }
+        // Dynamically verify certificates
+        for cert in &certificates {
+            // Skip if path doesn't exist
+            if !Path::new(&cert.path).exists() {
+                self.log(&format!("Certificate path not found: {}", cert.path));
+                continue;
+            }
+
+            // Skip verification for non-certificate files
+            if cert.cert_type.starts_with("kubeconfig-") || cert.cert_type == "encryption-config" {
+                self.log(&format!("Skipping verification for {}", cert.cert_type));
+                self.cert_tracker.mark_verified(&cert.cert_type, true);
+                continue;
+            }
+
+            // Determine CA chain based on certificate type
+            let ca_chain = match cert.cert_type.as_str() {
+                "root-ca" | "kubernetes-ca" => None, // CA certs don't need verification against another CA
+                _ => Some("certs/kubernetes-ca/ca-chain.crt"), // Default CA chain
+            };
+
+            // Verify the certificate
+            match verifier.verify_certificate(&cert.path, ca_chain) {
+                Ok(_) => {
+                    self.cert_tracker.mark_verified(&cert.cert_type, true);
+                    self.log(&format!("{} verified successfully", cert.cert_type));
+                }
+                Err(e) => {
+                    self.cert_tracker.mark_verified(&cert.cert_type, false);
+                    self.log(&format!("{} verification failed: {}", cert.cert_type, e));
                 }
             }
         }
 
-        // Verify remote certificates
+        // Verify service account keys if they exist
+        if Path::new("certs/service-account").exists() {
+            match verifier.verify_service_account_keypair(&PathBuf::from("certs/service-account")) {
+                Ok(_) => {
+                    self.cert_tracker.mark_verified("SA Public Key", true);
+                    self.cert_tracker.mark_verified("SA Private Key", true);
+                    self.log("Service Account keys verified successfully");
+                }
+                Err(e) => {
+                    self.cert_tracker.mark_verified("SA Public Key", false);
+                    self.cert_tracker.mark_verified("SA Private Key", false);
+                    self.log(&format!("Service Account keys verification failed: {}", e));
+                }
+            }
+        }
+
+        // Verify remote certificates for all hosts
         let all_hosts = self.get_all_hosts();
-        verifier.verify_remote_certificates(&all_hosts)?;
-
-        // Verify service account keys
-        verifier.verify_service_account_keypair(&PathBuf::from("certs/service-account"))?;
-
-        self.log("All certificate verifications completed successfully");
-        Ok(())
-    }
-
-    fn verify_service_account_keypair(&mut self) -> io::Result<()> {
-        self.log("Verifying service account key pair...");
-
-        let output = Command::new("openssl")
-            .args(&[
-                "rsa",
-                "-in",
-                "certs/service-account/sa.key",
-                "-pubout",
-                "-outform",
-                "PEM",
-            ])
-            .output()?;
-
-        if !output.status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to verify service account key pair",
-            ));
+        match verifier.verify_remote_certificates(&all_hosts) {
+            Ok(_) => self.log("Remote certificate verification completed successfully"),
+            Err(e) => self.log(&format!("Remote certificate verification failed: {}", e)),
         }
 
-        self.log("Service account key pair verified successfully");
-        Ok(())
-    }
-
-    fn copy_from_remote(&self, host: &str, remote_path: &str, local_path: &str) -> io::Result<()> {
-        let ssh_key_path = shellexpand::tilde(&self.config.ssh_key_path).to_string();
-
-        let output = Command::new("scp")
-            .args(&[
-                "-i",
-                &ssh_key_path,
-                &format!("{}@{}:{}", self.config.remote_user, host, remote_path),
-                local_path,
-            ])
-            .output()?;
-
-        if !output.status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to copy {} from {}", remote_path, host),
-            ));
-        }
-
+        self.log("All certificate verifications completed");
         Ok(())
     }
 
@@ -1001,54 +957,6 @@ impl CertManager {
         Ok(())
     }
 
-    fn execute_kubectl_command(&self, args: &[&str]) -> io::Result<()> {
-        let output = Command::new("kubectl").args(args).output()?;
-
-        if !output.status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "kubectl command failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn create_encryption_config(&self, key: &str) -> io::Result<String> {
-        Ok(format!(
-            r#"kind: EncryptionConfig
-apiVersion: v1
-resources:
-  - resources:
-      - secrets
-    providers:
-      - aescbc:
-          keys:
-            - name: key1
-              secret: {}
-      - identity: {{}}"#,
-            key
-        ))
-    }
-
-    fn generate_random_key(&self, length: usize) -> io::Result<String> {
-        let output = Command::new("head")
-            .args(&["-c", &length.to_string(), "/dev/urandom"])
-            .output()?;
-
-        if !output.status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to generate random key",
-            ));
-        }
-
-        Ok(general_purpose::STANDARD.encode(&output.stdout))
-    }
-
     pub fn save_config(&self) -> io::Result<()> {
         let config_path = PathBuf::from("cluster_config.json");
         self.config.save_to_file(config_path.to_str().unwrap())
@@ -1057,7 +965,7 @@ resources:
     pub fn get_status_info(&self) -> Vec<Line> {
         vec![
             Line::from(vec![
-                Span::styled("Current Operation: ", Style::default().fg(Color::Gray)),
+                Span::styled("Current Operation: ", ui::STATUS_LABEL_STYLE),
                 Span::styled(
                     &self.current_operation,
                     Style::default()
@@ -1066,25 +974,16 @@ resources:
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Control Plane: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    &self.config.control_plane,
-                    Style::default().fg(Color::Green),
-                ),
+                Span::styled("Control Plane: ", ui::STATUS_LABEL_STYLE),
+                Span::styled(&self.config.control_plane, ui::LOG_SUCCESS_STYLE),
             ]),
             Line::from(vec![
-                Span::styled("Worker Nodes: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    self.config.worker_nodes.join(", "),
-                    Style::default().fg(Color::Green),
-                ),
+                Span::styled("Worker Nodes: ", ui::STATUS_LABEL_STYLE),
+                Span::styled(self.config.worker_nodes.join(", "), ui::LOG_SUCCESS_STYLE),
             ]),
             Line::from(vec![
-                Span::styled("SSH Key: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    &self.config.ssh_key_path,
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled("SSH Key: ", ui::STATUS_LABEL_STYLE),
+                Span::styled(&self.config.ssh_key_path, ui::LOG_DEBUG_STYLE),
             ]),
         ]
     }
@@ -1317,14 +1216,6 @@ resources:
         self.set_current_operation("Generating Worker node certificates.");
         let worker_nodes = self.config.worker_nodes.clone();
 
-        // let nodes: Vec<(usize, String)> = self
-        //     .config
-        //     .worker_nodes
-        //     .iter()
-        //     .enumerate()
-        //     .map(|(i, node)| (i, node.clone()))
-        //     .collect();
-
         let nodes: Vec<(usize, String)> = worker_nodes
             .iter()
             .enumerate()
@@ -1340,34 +1231,6 @@ resources:
         self.generate_worker_kubeconfigs()?;
 
         Ok(())
-    }
-
-    fn create_extensions_file(&self, path: &Path, config: &CertificateConfig) -> io::Result<()> {
-        let mut content = String::new();
-
-        if !config.key_usage.is_empty() {
-            content.push_str(&format!("keyUsage = {}\n", config.key_usage.join(", ")));
-        }
-
-        if !config.extended_key_usage.is_empty() {
-            content.push_str(&format!(
-                "extendedKeyUsage = {}\n",
-                config.extended_key_usage.join(", ")
-            ));
-        }
-
-        if !config.alt_names.is_empty() {
-            content.push_str("subjectAltName = @alt_names\n\n[alt_names]\n");
-            for (i, name) in config.alt_names.iter().enumerate() {
-                if name.starts_with("IP:") {
-                    content.push_str(&format!("IP.{} = {}\n", i + 1, &name[3..]));
-                } else if name.starts_with("DNS:") {
-                    content.push_str(&format!("DNS.{} = {}\n", i + 1, &name[4..]));
-                }
-            }
-        }
-
-        fs::write(path, content)
     }
 
     fn generate_worker_kubeconfigs(&mut self) -> io::Result<()> {
@@ -1457,6 +1320,179 @@ resources:
         }
     }
 
+    pub async fn import_existing_certificates(&mut self) -> io::Result<()> {
+        let discovery = CertificateDiscovery::new();
+
+        // Use full paths to the directories containing certificates
+        let paths = [
+            Path::new("certs/kubernetes-ca"),
+            Path::new("certs/root-ca"),
+            Path::new("certs"), // Fallback to full certs directory
+            Path::new("kubeconfig"),
+            Path::new("pki"),
+        ];
+
+        for path in &paths {
+            match discovery.discover_certificates(path, self).await {
+                Ok(certs) => {
+                    for cert in certs {
+                        // Standardize certificate names
+                        let cert_type = self.determine_cert_type(&cert);
+
+                        self.log(&format!(
+                            "Importing certificate: {} (Original subject: {})",
+                            cert_type, cert.subject
+                        ));
+
+                        self.cert_tracker.add_certificate(
+                            &cert_type, // Use standardized name
+                            cert.path.to_str().unwrap(),
+                            vec![self.config.control_plane.clone()],
+                        );
+                    }
+                }
+                Err(e) => self.log(&format!(
+                    "Error discovering certificates in {}: {}",
+                    path.display(),
+                    e
+                )),
+            }
+        }
+
+        self.validate_cluster_trust(&discovery).await?;
+        Ok(())
+    }
+
+    // Helper function to determine standard certificate type
+    pub fn determine_cert_type(&mut self, cert_info: &CertificateInfo) -> String {
+        // Check filename first
+        let filename = cert_info
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+
+        // Filename-based rules
+        if filename.contains("ca-chain") {
+            return "ca-chain".to_string();
+        }
+
+        if filename.contains("sa.pub") {
+            return "sa-public-key".to_string();
+        }
+
+        if filename.contains("sa.key") {
+            return "sa-private-key".to_string();
+        }
+
+        if filename.contains("encryption-config") {
+            return "encryption-config".to_string();
+        }
+
+        if filename.contains("ca.crt") {
+            // Check subject for more precise identification
+            let subject_lower = cert_info.subject.to_lowercase();
+
+            if subject_lower.contains("root") {
+                return "root-ca".to_string();
+            }
+
+            if subject_lower.contains("kubernetes") {
+                return "kubernetes-ca".to_string();
+            }
+        }
+
+        // Subject-based detection for special keys
+        let subject_lower = cert_info.subject.to_lowercase();
+
+        if subject_lower.contains("service account") {
+            if filename.contains(".key") {
+                return "sa-private-key".to_string();
+            }
+            if filename.contains(".pub") {
+                return "sa-public-key".to_string();
+            }
+        }
+
+        // Controller Manager specific detection
+        if subject_lower.contains("system:kube-controller-manager") {
+            return "controller-manager".to_string();
+        }
+
+        // Fallback to subject-based detection
+        if cert_info.subject.contains("Root CA") {
+            return "root-ca".to_string();
+        }
+
+        if cert_info.subject.contains("Kubernetes Root CA") {
+            return "kubernetes-ca".to_string();
+        }
+
+        // Default fallback
+        if cert_info.is_ca {
+            return "ca".to_string();
+        }
+
+        // If all else fails, use a generic name with a hash to ensure uniqueness
+        format!("cert-{}", &cert_info.fingerprint[..8])
+    }
+
+    async fn validate_cluster_trust(&mut self, discovery: &CertificateDiscovery) -> io::Result<()> {
+        // Clear existing trust store to start fresh
+        let mut trust_store = discovery.get_trust_store_contents().await;
+        trust_store.clear();
+
+        // Validate control plane certificates
+        let control_plane_certs = discovery
+            .discover_certificates(Path::new("certs"), self)
+            .await?;
+        // Validate control plane trust
+        discovery
+            .validate_node_trust(&self.config.control_plane, control_plane_certs.clone())
+            .await?;
+
+        // Validate worker nodes
+        for worker in self.config.worker_nodes.clone() {
+            // Try to find worker-specific certificates
+            let worker_certs = discovery
+                .discover_certificates(Path::new(&format!("certs/node-{}", worker)), self)
+                .await
+                .unwrap_or(control_plane_certs.clone());
+
+            discovery.validate_node_trust(&worker, worker_certs).await?;
+        }
+
+        // Retrieve the updated trust store contents
+        let updated_trust_store = discovery.get_trust_store_contents().await;
+
+        for (node, trust_info) in &updated_trust_store {
+            self.log(&format!(
+                "Node {} trust validation - Trust chain valid: {} && Permissions valid: {}",
+                node, trust_info.trust_chain_valid, trust_info.permissions_valid
+            ));
+            self.log(&format!(
+                "  Trust chain valid: {}",
+                trust_info.trust_chain_valid
+            ));
+            self.log(&format!(
+                "  Permissions valid: {}",
+                trust_info.permissions_valid
+            ));
+
+            if !trust_info.expiring_soon.is_empty() {
+                self.log("  Certificates expiring soon:");
+                for cert in &trust_info.expiring_soon {
+                    self.log(&format!("    - {}", cert));
+                }
+            }
+        }
+
+        // Update the local trust store
+        self.trust_store = Some(updated_trust_store);
+
+        Ok(())
+    }
+
     pub fn log(&mut self, message: &str) {
         self.logs.push(format!(
             "{}: {}",
@@ -1464,10 +1500,7 @@ resources:
             message
         ));
 
-        // Auto-scroll to bottom if not in view mode
-        if self.mode != AppMode::ViewLogs {
-            self.scroll_to_bottom()
-        }
+        self.scroll_to_bottom()
     }
 
     fn debug_log(&mut self, message: &str) {
@@ -1478,7 +1511,7 @@ resources:
 
     // Helper method to scroll to bottom explicitly
     pub fn scroll_to_bottom(&mut self) {
-        let visible_height = 9;
+        let visible_height = 18;
         if self.logs.len() > visible_height {
             // Set scroll position to show the last 'visible_height' logs
             self.log_scroll = self.logs.len() - visible_height;

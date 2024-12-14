@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Bell } from 'lucide-react';
 
 export const NotificationBell = () => {
-    const [unread, setUnread] = useState(2);
+    const [unread, setUnread] = useState(0);
 
     return (
         <div className="relative">

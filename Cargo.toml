@@ -22,3 +22,10 @@ utoipa = { version = "5.2.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "8.0.3", features = ["axum"] }
 serde_yaml = "0.9.34"
 uuid = { version = "1.11.0", features = ["v4"] }
+url = "2.5.4"
+hex = "0.4.3"
+openssl = "0.10.68"
+yaml-rust = "0.4.5"
+x509-parser = "0.16.0"
+ssh2 = "0.9.4"
+dirs = "5.0.1"

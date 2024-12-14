@@ -1,7 +1,9 @@
 use super::styles::*;
 use crate::app::CertManager;
-use crate::types::AppMode;
+use crate::types::{ActiveSection, AppMode};
 use crate::utils::constants::BACKGROUND_ART;
+use ratatui::layout::Margin;
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -18,12 +20,11 @@ pub fn render_all(f: &mut Frame, cert_manager: &CertManager) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(4),  // Title
-            Constraint::Length(7),  // Status/Config
-            Constraint::Length(18), // Menu
-            Constraint::Length(12), // Cert Status
-            Constraint::Max(12),    // Logs
-            Constraint::Length(3),  // Help
+            Constraint::Length(3),      // Title
+            Constraint::Length(7),      // Status/Config
+            Constraint::Percentage(40), // Menu + Cert Status section
+            Constraint::Percentage(40), // Logs + Trust Info section
+            Constraint::Length(3),      // Help
         ])
         .split(f.area());
 
@@ -35,14 +36,30 @@ pub fn render_all(f: &mut Frame, cert_manager: &CertManager) {
         }
         _ => {
             render_status(f, chunks[1], cert_manager);
-            render_menu(f, chunks[2], cert_manager);
         }
     }
 
-    render_certificate_status(f, chunks[3], cert_manager);
+    // Split middle section horizontally
+    let middle_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .margin(0) // Remove margin
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[2]);
 
-    render_logs(f, chunks[4], cert_manager);
-    render_help(f, chunks[5], &cert_manager.mode);
+    render_menu(f, middle_chunks[0], cert_manager);
+    render_certificate_status(f, middle_chunks[1], cert_manager);
+
+    // Split bottom section horizontally
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .margin(0) // Remove margin
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[3]);
+
+    render_logs(f, bottom_chunks[0], cert_manager);
+    render_trust_info(f, bottom_chunks[1], cert_manager);
+
+    render_help(f, chunks[4], &cert_manager.mode);
 
     // Render confirmation dialog on top if active
     if cert_manager.mode == AppMode::Confirmation {
@@ -116,11 +133,17 @@ fn render_status(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
     f.render_widget(status, area);
 }
 
-pub fn render_menu(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
+fn render_menu(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
+    // Calculate visible items based on area height
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let start_index = cert_manager.menu_scroll;
+
     let menu_items: Vec<ListItem> = cert_manager
         .menu_items
         .iter()
         .enumerate()
+        .skip(start_index)
+        .take(visible_height)
         .map(|(i, item)| {
             let base_style = if item == "Automate all" {
                 AUTOMATE_STYLE
@@ -149,80 +172,122 @@ pub fn render_menu(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
         })
         .collect();
 
-    let menu = List::new(menu_items).block(
-        Block::default()
-            .title("Menu")
-            .title_style(TITLE_STYLE)
-            .borders(Borders::ALL)
-            .border_style(BORDER_STYLE),
-    );
+    let block = Block::default()
+        .title(format!(
+            "Menu [{}/{}]",
+            cert_manager.selected_menu + 1,
+            cert_manager.menu_items.len()
+        ))
+        .title_style(TITLE_STYLE)
+        .borders(Borders::ALL)
+        .border_style(if cert_manager.active_section == ActiveSection::Menu {
+            BORDER_STYLE.fg(Color::Cyan)
+        } else {
+            BORDER_STYLE
+        });
 
-    f.render_widget(menu, area);
+    let menu_area = area.inner(Margin {
+        vertical: 0,
+        horizontal: 1, // Space for scrollbar
+    });
+
+    // Calculate scroll offset to keep selected item visible
+    // let visible_items = (area.height as usize).saturating_sub(2); // Subtract 2 for borders
+    // let scroll_offset = if cert_manager.selected_menu >= visible_items {
+    //     cert_manager.selected_menu.saturating_sub(visible_items - 1)
+    // } else {
+    //     0
+    // };
+
+    let menu = List::new(menu_items).block(block);
+
+    f.render_widget(menu, menu_area);
+
+    // Add scrollbar
+    let mut scrollbar_state = ScrollbarState::default()
+        .content_length(cert_manager.menu_items.len())
+        .viewport_content_length(area.height.saturating_sub(2) as usize)
+        .position(cert_manager.selected_menu);
+
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"))
+        .track_symbol(Some("│"))
+        .thumb_symbol("█");
+
+    f.render_stateful_widget(
+        scrollbar,
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut scrollbar_state,
+    );
 }
 
 fn render_certificate_status(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
     // let status_info = cert_manager.get_certificate_status_info();
-    let mut status_info = Vec::new();
+    // let mut status_info = Vec::new();
 
-    // Add headers
-    status_info.push(Line::from(vec![
-        Span::styled(
-            format!("{:<20}", "NAME"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<12}", "DISTRIBUTED"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{:<12}", "VERIFIED"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "TIMESTAMP",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    // Add separator line
-    status_info.push(Line::from(vec![Span::styled(
-        "─".repeat(area.width as usize - 2), // -2 for borders
-        Style::default().fg(Color::DarkGray),
-    )]));
-
-    // Add certificate information
+    let visible_height = area.height.saturating_sub(3) as usize;
     let cert_info = cert_manager.get_certificate_status_info();
-    if cert_info.len() == 1 && cert_info[0].spans[0].content == "No certificates generated yet" {
-        status_info.push(cert_info[0].clone());
+    let start_index = cert_manager.cert_status_scroll;
+
+    let visible_certs = if cert_info.len() == 1
+        && cert_info[0].spans[0].content == "No certificates generated yet"
+    {
+        cert_manager.get_certificate_status_info()
     } else {
-        status_info.extend(cert_info);
-    }
+        cert_info
+            .iter()
+            .skip(start_index)
+            .take(visible_height)
+            .cloned()
+            .collect()
+    };
 
-    let status_widget = Paragraph::new(status_info)
-        .block(
-            Block::default()
-                .title("Certificate Status")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .style(Style::default().fg(Color::White));
+    let block = Block::default()
+        .title(format!(
+            "Certificate Status [{}/{}]",
+            start_index + 1,
+            cert_info.len()
+        ))
+        .borders(Borders::ALL)
+        .border_style(
+            if cert_manager.active_section == ActiveSection::CertStatus {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            },
+        );
 
+    let status_widget = Paragraph::new(visible_certs).block(block);
     f.render_widget(status_widget, area);
+
+    // Add scrollbar
+    let mut scrollbar_state = ScrollbarState::default()
+        .content_length(cert_manager.menu_items.len())
+        .viewport_content_length(area.height.saturating_sub(2) as usize)
+        .position(cert_manager.cert_status_scroll);
+
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"))
+        .track_symbol(Some("│"))
+        .thumb_symbol("█");
+
+    f.render_stateful_widget(
+        scrollbar,
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut scrollbar_state,
+    );
 }
 
 pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
     let log_count = cert_manager.logs.len();
-
-    // Calculate visible range
-    // let visible_height = area.height as usize - 2; // Account for borders
     let visible_height = (area.height as usize).saturating_sub(2); // Subtract 2 for borders
     let start_index = cert_manager.log_scroll;
     let end_index = (start_index + visible_height).min(log_count);
@@ -231,6 +296,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
         .logs
         .iter()
         .skip(start_index)
+        .take(visible_height)
         .map(|log| {
             let style = if log.contains("Error") {
                 LOG_ERROR_STYLE
@@ -256,17 +322,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
         String::new()
     };
 
-    let at_bottom = cert_manager.log_scroll >= log_count.saturating_sub(visible_height);
-    let scroll_style = if at_bottom {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-
-    let title = format!("Logs{}", scroll_indicator);
-
     let at_bottom = end_index == log_count;
-
     let scroll_style = if at_bottom {
         Style::default().fg(Color::Green)
     } else {
@@ -275,16 +331,40 @@ pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
 
     let logs = List::new(visible_logs).block(
         Block::default()
-            .title(Span::styled(title, scroll_style))
-            .title_style(match cert_manager.mode {
-                AppMode::ViewLogs => TITLE_STYLE.add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                _ => TITLE_STYLE,
-            })
+            .title(Span::styled(
+                format!("Logs{}", scroll_indicator),
+                scroll_style,
+            ))
             .borders(Borders::ALL)
-            .border_style(BORDER_STYLE),
+            .border_style(if cert_manager.active_section == ActiveSection::Logs {
+                Style::default().fg(Color::Cyan)
+            } else {
+                BORDER_STYLE
+            }),
     );
 
     f.render_widget(logs, area);
+
+    // Add scrollbar
+    let mut scrollbar_state = ScrollbarState::default()
+        .content_length(cert_manager.menu_items.len())
+        .viewport_content_length(area.height.saturating_sub(2) as usize)
+        .position(cert_manager.log_scroll);
+
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"))
+        .track_symbol(Some("│"))
+        .thumb_symbol("█");
+
+    f.render_stateful_widget(
+        scrollbar,
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut scrollbar_state,
+    );
 }
 
 pub fn render_config_editor(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
@@ -365,14 +445,6 @@ pub fn render_config_editor(f: &mut Frame, area: Rect, cert_manager: &CertManage
 
 pub fn render_help(f: &mut Frame, area: Rect, mode: &AppMode) {
     let help_text = match mode {
-        AppMode::ViewLogs => vec![
-            Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
-            Span::raw(": Scroll | "),
-            Span::styled("PgUp/PgDn", Style::default().fg(Color::Yellow)),
-            Span::raw(": Page Scroll | "),
-            Span::styled("Esc", Style::default().fg(Color::Yellow)),
-            Span::raw(": Exit Log View"),
-        ],
         AppMode::EditConfig => vec![
             Span::styled("Enter", Style::default().fg(Color::Yellow)),
             Span::raw(": Edit | "),
@@ -394,8 +466,6 @@ pub fn render_help(f: &mut Frame, area: Rect, mode: &AppMode) {
             Span::raw(": Navigate | "),
             Span::styled("Enter", Style::default().fg(Color::Yellow)),
             Span::raw(": Select | "),
-            Span::styled("L", Style::default().fg(Color::Yellow)),
-            Span::raw(": View Logs | "),
             Span::styled("Q", Style::default().fg(Color::Yellow)),
             Span::raw(": Quit"),
         ],
@@ -467,5 +537,125 @@ pub fn render_confirmation_dialog(f: &mut Frame, area: Rect, cert_manager: &Cert
 
         f.render_widget(Clear, dialog_area); // Clear the background
         f.render_widget(paragraph, dialog_area);
+    }
+}
+
+pub fn render_trust_info(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
+    let block = Block::default()
+        .title("Trust Validation")
+        .borders(Borders::ALL)
+        .border_style(if cert_manager.active_section == ActiveSection::TrustInfo {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        });
+
+    let inner_area = block.inner(area);
+    f.render_widget(block, area);
+
+    let content = if let Some(store) = &cert_manager.trust_store {
+        let store_vec: Vec<_> = store.iter().collect();
+        let mut lines = Vec::new();
+
+        for (node, trust_info) in store_vec.iter().skip(cert_manager.trust_info_scroll) {
+            // Node header
+            lines.push(Line::from(vec![Span::styled(
+                format!("Node: {}", node),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+
+            // Trust chain status
+            let chain_status_color = if trust_info.trust_chain_valid {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  Trust Chain: "),
+                Span::styled(
+                    format!(
+                        "{}",
+                        if trust_info.trust_chain_valid {
+                            "Valid"
+                        } else {
+                            "Invalid"
+                        }
+                    ),
+                    Style::default().fg(chain_status_color),
+                ),
+            ]));
+
+            // Permissions status
+            let perm_status_color = if trust_info.permissions_valid {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  Permissions: "),
+                Span::styled(
+                    format!(
+                        "{}",
+                        if trust_info.permissions_valid {
+                            "Valid"
+                        } else {
+                            "Invalid"
+                        }
+                    ),
+                    Style::default().fg(perm_status_color),
+                ),
+            ]));
+
+            // Expiring certificates
+            if !trust_info.expiring_soon.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    "  Expiring Certificates:",
+                    Style::default().fg(Color::Yellow),
+                )]));
+                for cert in &trust_info.expiring_soon {
+                    lines.push(Line::from(vec![Span::raw(format!("    - {}", cert))]));
+                }
+            }
+
+            // Last checked timestamp
+            lines.push(Line::from(vec![
+                Span::raw("  Last Checked: "),
+                Span::styled(
+                    trust_info.last_checked.to_rfc3339(),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]));
+            lines.push(Line::from(vec![Span::raw("")])); // Add spacing between nodes
+        }
+        lines
+    } else {
+        vec![Line::from("Trust information not available")]
+    };
+
+    let paragraph = Paragraph::new(content);
+    f.render_widget(paragraph, inner_area);
+
+    if let Some(store) = &cert_manager.trust_store {
+        let mut scrollbar_state = ScrollbarState::default()
+            .content_length(store.len())
+            .viewport_content_length(area.height.saturating_sub(2) as usize)
+            .position(cert_manager.trust_info_scroll);
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
     }
 }
