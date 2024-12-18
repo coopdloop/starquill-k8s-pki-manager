@@ -1,5 +1,7 @@
 # Starquill - Kubernetes Certificate Management Suite
 
+⚠️IMPORTANT - THIS PROJECT IS IN EARLY TESTING AND PROBABLY HAS MANY BUGS - BASIC FUNCTIONALITY IS THERE⚠️
+
 Starquill is a comprehensive Kubernetes certificate management suite that combines a powerful Terminal User Interface (TUI) with a modern web application for visual cluster management. Built with Rust and React, it provides a robust solution for generating, distributing, and managing certificates across your Kubernetes cluster.
 
 
