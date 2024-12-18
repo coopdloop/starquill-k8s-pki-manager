@@ -1,6 +1,4 @@
 // src/cert/mod.rs
-mod api_server;
-pub mod ca;
 mod controller;
 pub mod controller_manager;
 pub mod kubelet;

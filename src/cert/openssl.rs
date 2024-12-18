@@ -1,5 +1,5 @@
 // src/cert/openssl.rs
-use super::types::CertificateConfig;
+use super::types::{AltNameType, CertificateConfig};
 use crate::cert::CertificateType;
 use crate::utils::logging::Logger;
 use std::{fs, io, path::Path, process::Command};
@@ -247,22 +247,48 @@ prompt = no
 [req_distinguished_name]
 CN = {}
 O = {}
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = nonRepudiation, digitalSignature, keyEncipherment
 "#,
         config.common_name,
         config.organization.as_deref().unwrap_or("Kubernetes")
     );
 
+    // Add optional location fields if present
+    if let Some(country) = &config.country {
+        content.push_str(&format!("C = {}\n", country));
+    }
+    if let Some(state) = &config.state {
+        content.push_str(&format!("ST = {}\n", state));
+    }
+    if let Some(locality) = &config.locality {
+        content.push_str(&format!("L = {}\n", locality));
+    }
+
+    // Add v3_req section
+    content.push_str("\n[v3_req]\nbasicConstraints = CA:FALSE\n");
+
+    // Add key usage if present
+    if !config.key_usage.is_empty() {
+        content.push_str(&format!("keyUsage = {}\n", config.key_usage.join(", ")));
+    }
+
+    // Add extended key usage if present
+    if !config.extended_key_usage.is_empty() {
+        content.push_str(&format!(
+            "extendedKeyUsage = {}\n",
+            config.extended_key_usage.join(", ")
+        ));
+    }
+
     if !config.alt_names.is_empty() {
         content.push_str("subjectAltName = @alt_names\n\n[alt_names]\n");
-        for (i, name) in config.alt_names.iter().enumerate() {
-            if name.starts_with("IP:") {
-                content.push_str(&format!("IP.{} = {}\n", i + 1, &name[3..]));
-            } else {
-                content.push_str(&format!("DNS.{} = {}\n", i + 1, name));
+        for (i, alt_name) in config.alt_names.iter().enumerate() {
+            match alt_name.alt_type {
+                AltNameType::IP => {
+                    content.push_str(&format!("IP.{} = {}\n", i + 1, alt_name.value));
+                }
+                AltNameType::DNS => {
+                    content.push_str(&format!("DNS.{} = {}\n", i + 1, alt_name.value));
+                }
             }
         }
     }
@@ -299,11 +325,14 @@ fn create_extensions_file(path: &str, config: &CertificateConfig) -> io::Result<
     // Subject Alternative Names
     if !config.alt_names.is_empty() {
         content.push_str("subjectAltName = @alt_names\n\n[alt_names]\n");
-        for (i, name) in config.alt_names.iter().enumerate() {
-            if name.starts_with("IP:") {
-                content.push_str(&format!("IP.{} = {}\n", i + 1, &name[3..]));
-            } else {
-                content.push_str(&format!("DNS.{} = {}\n", i + 1, name));
+        for (i, alt_name) in config.alt_names.iter().enumerate() {
+            match alt_name.alt_type {
+                AltNameType::IP => {
+                    content.push_str(&format!("IP.{} = {}\n", i + 1, alt_name.value));
+                }
+                AltNameType::DNS => {
+                    content.push_str(&format!("DNS.{} = {}\n", i + 1, alt_name.value));
+                }
             }
         }
     }

@@ -473,8 +473,14 @@ impl CertManager {
                     hosts.clone(),
                 );
                 self.cert_tracker.add_certificate(
-                    "kubernetes-ca",
+                    "ca.crt",
                     "kubernetes-ca/ca.crt",
+                    // vec![self.config.control_plane.clone()],
+                    hosts.clone(),
+                );
+                self.cert_tracker.add_certificate(
+                    "ca.key",
+                    "kubernetes-ca/ca.key",
                     // vec![self.config.control_plane.clone()],
                     hosts.clone(),
                 );
@@ -486,7 +492,8 @@ impl CertManager {
                 );
 
                 self.cert_tracker.mark_verified("root-ca", true);
-                self.cert_tracker.mark_verified("kubernetes-ca", true);
+                self.cert_tracker.mark_verified("ca.crt", true);
+                self.cert_tracker.mark_verified("ca.key", true);
                 self.cert_tracker.mark_verified("ca-chain", true);
 
                 // Optional Add confirmation dialog for distributing CA chain
@@ -524,10 +531,13 @@ impl CertManager {
                 "cRLSign".to_string(),
             ],
             extended_key_usage: vec![],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         };
 
         self.get_cert_ops().generate_cert(
-            "kubernetes-ca",
+            "root-ca",
             "certs/root-ca",
             &config,
             &[&control_plane],
@@ -537,8 +547,14 @@ impl CertManager {
         self.create_kubernetes_ca_chain()?;
 
         self.cert_tracker.add_certificate(
-            "kubernetes-ca",
-            "certs/kubernetes-ca/ca.crt",
+            "ca.crt",
+            "kubernetes-ca/ca.crt",
+            vec![self.config.control_plane.clone()],
+        );
+
+        self.cert_tracker.add_certificate(
+            "ca.key",
+            "kubernetes-ca/ca.key",
             vec![self.config.control_plane.clone()],
         );
 
@@ -563,6 +579,9 @@ impl CertManager {
                 "keyEncipherment".to_string(),
             ],
             extended_key_usage: vec!["clientAuth".to_string()],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         };
 
         self.get_cert_ops().generate_cert(
@@ -571,6 +590,8 @@ impl CertManager {
             &config,
             &[&control_plane],
         )?;
+
+        self.set_current_operation("Generated Kubelet Client Certificate");
 
         Ok(())
     }
@@ -727,6 +748,7 @@ impl CertManager {
                 self.log(&format!("Certificate path not found: {}", cert.path));
                 continue;
             }
+            self.log(&format!("Certificate path found: {}", cert.path));
 
             // Skip verification for non-certificate files
             if cert.cert_type.starts_with("kubeconfig-") || cert.cert_type == "encryption-config" {
@@ -1125,11 +1147,11 @@ impl CertManager {
                                 for host in hosts {
                                     self.log(&format!("Distributing to host: {}", host));
                                     let source_path = if cert_type.starts_with("kubeconfig-") {
-                                        format!("kubeconfig/{}", path)
+                                        format!("{}", path)
                                     } else if cert_type == "encryption-config" {
                                         "encryption-config.yaml".to_string()
                                     } else {
-                                        format!("certs/{}", path)
+                                        format!("{}", path)
                                     };
 
                                     match cert_ops.copy_to_k8s_paths(&source_path, &host) {
@@ -1244,7 +1266,7 @@ impl CertManager {
             self.generate_kubeconfig(&node_name, &credential_name)?;
 
             // Use cert_ops for distribution
-            cert_ops.copy_to_k8s_paths(&format!("kubeconfig/{}", node_name), node)?;
+            cert_ops.copy_to_k8s_paths(&format!("kubeconfig/{}.conf", node_name), node)?;
         }
         Ok(())
     }
@@ -1397,9 +1419,15 @@ impl CertManager {
                 return "root-ca".to_string();
             }
 
-            if subject_lower.contains("kubernetes") {
-                return "kubernetes-ca".to_string();
-            }
+            return "ca.crt".to_string();
+        }
+
+        if filename.contains("ca.key")  {
+            // Check subject for more precise identification
+            let subject_lower = cert_info.subject.to_lowercase();
+            self.log(&subject_lower);
+
+            return "ca.key".to_string();
         }
 
         // Subject-based detection for special keys
@@ -1425,7 +1453,7 @@ impl CertManager {
         }
 
         if cert_info.subject.contains("Kubernetes Root CA") {
-            return "kubernetes-ca".to_string();
+            return "ca".to_string();
         }
 
         // Default fallback

@@ -292,7 +292,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
     let start_index = cert_manager.log_scroll;
     let end_index = (start_index + visible_height).min(log_count);
 
-    let visible_logs: Vec<ListItem> = cert_manager
+    let visible_logs: Vec<Line> = cert_manager
         .logs
         .iter()
         .skip(start_index)
@@ -312,7 +312,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
                 LOG_INFO_STYLE
             };
 
-            ListItem::new(Line::from(vec![Span::styled(log, style)]))
+            Line::from(vec![Span::styled(log, style)])
         })
         .collect();
 
@@ -329,23 +329,25 @@ pub fn render_logs(f: &mut Frame, area: Rect, cert_manager: &CertManager) {
         Style::default().fg(Color::Yellow)
     };
 
-    let logs = List::new(visible_logs).block(
-        Block::default()
-            .title(Span::styled(
-                format!("Logs{}", scroll_indicator),
-                scroll_style,
-            ))
-            .borders(Borders::ALL)
-            .border_style(if cert_manager.active_section == ActiveSection::Logs {
-                Style::default().fg(Color::Cyan)
-            } else {
-                BORDER_STYLE
-            }),
-    );
+    let logs = Paragraph::new(visible_logs)
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    format!("Logs{}", scroll_indicator),
+                    scroll_style,
+                ))
+                .borders(Borders::ALL)
+                .border_style(if cert_manager.active_section == ActiveSection::Logs {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    BORDER_STYLE
+                }),
+        )
+        .wrap(Wrap { trim: true });
 
     f.render_widget(logs, area);
 
-    // Add scrollbar
+    // Scrollbar code remains the same
     let mut scrollbar_state = ScrollbarState::default()
         .content_length(cert_manager.menu_items.len())
         .viewport_content_length(area.height.saturating_sub(2) as usize)

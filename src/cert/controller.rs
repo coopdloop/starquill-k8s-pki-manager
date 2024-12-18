@@ -2,7 +2,7 @@
 
 use super::{
     operations::CertificateOperations,
-    types::{CertificateConfig, CertificateType, ClusterEndpoints},
+    types::{AltName, CertificateConfig, CertificateType, ClusterEndpoints},
 };
 use std::{io, path::PathBuf};
 
@@ -30,14 +30,10 @@ impl<'a> ControllerCertGenerator<'a> {
             &[&self.endpoints.control_plane],
         )?;
 
-        // self.cert_ops.logger
-        //     .log("API Server certificate generated successfully");
         Ok(())
     }
 
     pub fn generate_controller_manager_cert(&mut self) -> io::Result<()> {
-        // self.cert_ops.logger.log("Generating Controller Manager Certificate");
-
         let config = self.get_controller_config();
         self.cert_ops.generate_cert(
             "controller-manager",
@@ -46,15 +42,10 @@ impl<'a> ControllerCertGenerator<'a> {
             &[&self.endpoints.control_plane],
         )?;
 
-        // self.cert_ops
-        //     .logger
-        //     .log("Controller Manager certificate generated successfully");
         Ok(())
     }
 
     pub fn generate_scheduler_cert(&mut self) -> io::Result<()> {
-        // self.cert_ops.logger.log("Generating Scheduler Certificate");
-
         let config = self.get_scheduler_config();
         self.cert_ops.generate_cert(
             "scheduler",
@@ -63,9 +54,6 @@ impl<'a> ControllerCertGenerator<'a> {
             &[&self.endpoints.control_plane],
         )?;
 
-        // self.cert_ops
-        //     .logger
-        //     .log("Scheduler certificate generated successfully");
         Ok(())
     }
 
@@ -77,13 +65,19 @@ impl<'a> ControllerCertGenerator<'a> {
             validity_days: 375,
             key_size: 2048,
             output_dir: PathBuf::from("certs/controller-manager"),
-            alt_names: vec![],
+            alt_names: vec![
+                AltName::dns("kube-proxy".to_string()),
+                AltName::ip("127.0.0.1".to_string()),
+            ],
             key_usage: vec![
                 "critical".to_string(),
                 "digitalSignature".to_string(),
                 "keyEncipherment".to_string(),
             ],
-            extended_key_usage: vec!["clientAuth".to_string()],
+            extended_key_usage: vec!["clientAuth".to_string(), "serverAuth".to_string()],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         }
     }
 
@@ -95,13 +89,19 @@ impl<'a> ControllerCertGenerator<'a> {
             validity_days: 375,
             key_size: 2048,
             output_dir: PathBuf::from("certs/scheduler"),
-            alt_names: vec![],
+            alt_names: vec![
+                AltName::dns("kube-scheduler".to_string()),
+                AltName::ip("127.0.0.1".to_string()),
+            ],
             key_usage: vec![
                 "critical".to_string(),
                 "digitalSignature".to_string(),
                 "keyEncipherment".to_string(),
             ],
-            extended_key_usage: vec!["clientAuth".to_string()],
+            extended_key_usage: vec!["clientAuth".to_string(), "serverAuth".to_string()],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         }
     }
 
@@ -109,16 +109,21 @@ impl<'a> ControllerCertGenerator<'a> {
         CertificateConfig {
             cert_type: CertificateType::APIServer,
             common_name: "kube-apiserver".to_string(),
-            organization: Some("Kubernetes".to_string()),
+            organization: Some("kubernetes".to_string()),
             validity_days: 375,
             key_size: 2048,
             output_dir: PathBuf::from("certs/kube-apiserver"),
             alt_names: vec![
-                "kubernetes".to_string(),
-                "kubernetes.default".to_string(),
-                "kubernetes.default.svc".to_string(),
-                "kubernetes.default.svc.cluster.local".to_string(),
-                format!("IP:{}", self.endpoints.control_plane),
+                AltName::dns("localhost".to_string()),
+                AltName::ip("127.0.0.1".to_string()),
+                AltName::dns("control-plane-0".to_string()),
+                AltName::ip(self.endpoints.control_plane.clone()),
+                AltName::ip("10.96.0.1".to_string()), // Kubernetes service IP
+                AltName::dns("kubernetes".to_string()),
+                AltName::dns("kubernetes.default".to_string()),
+                AltName::dns("kubernetes.default.svc".to_string()),
+                AltName::dns("kubernetes.default.svc.cluster".to_string()),
+                AltName::dns("kubernetes.default.svc.cluster.local".to_string()),
             ],
             key_usage: vec![
                 "critical".to_string(),
@@ -126,6 +131,9 @@ impl<'a> ControllerCertGenerator<'a> {
                 "keyEncipherment".to_string(),
             ],
             extended_key_usage: vec!["serverAuth".to_string()],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         }
     }
 }

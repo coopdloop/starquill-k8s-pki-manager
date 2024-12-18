@@ -1,5 +1,5 @@
 use super::operations::CertificateOperations;
-use super::types::{CertificateConfig, CertificateType};
+use super::types::{AltName, CertificateConfig, CertificateType};
 use super::CertOperationError;
 use std::{io, path::PathBuf};
 
@@ -34,16 +34,12 @@ impl<'a> NodeCertGenerator<'a> {
         &mut self,
         nodes: &[(usize, String)], // (index, node_address)
     ) -> io::Result<()> {
-        self.cert_ops
-            .log("Starting worker node certificate generation...");
 
         for (index, node) in nodes {
             let node_name = format!("node-{}", index + 1);
             self.generate_node_certificate(&node_name, node, *index);
         }
 
-        self.cert_ops
-            .log("Worker node certificates generated successfully");
         Ok(())
     }
 
@@ -64,10 +60,13 @@ impl<'a> NodeCertGenerator<'a> {
             key_size: 2048,
             output_dir: PathBuf::from(format!("certs/{}", node_name)),
             alt_names: vec![
-                format!("DNS:{}", node),
-                format!("IP:{}", node),
-                format!("DNS:node-{}", index + 1),
-                format!("DNS:node-{}.cluster.local", index + 1),
+                // Handle both DNS and IP entries for the node
+                AltName::dns(node.to_string()),
+                AltName::ip(node.to_string()),
+                AltName::dns(format!("node-{}", index + 1)),
+                AltName::dns(format!("node-{}.cluster.local", index + 1)),
+                // Add localhost entries for kubelet
+                AltName::ip("127.0.0.1".to_string()),
             ],
             key_usage: vec![
                 "critical".to_string(),
@@ -75,6 +74,9 @@ impl<'a> NodeCertGenerator<'a> {
                 "keyEncipherment".to_string(),
             ],
             extended_key_usage: vec!["serverAuth".to_string(), "clientAuth".to_string()],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         };
 
         self.cert_ops

@@ -211,6 +211,9 @@ impl CertificateOperations {
                 "cRLSign".to_string(),
             ],
             extended_key_usage: vec![],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         };
 
         self.generate_cert("ca", "certs/root-ca", &root_config, hosts)?;
@@ -230,6 +233,9 @@ impl CertificateOperations {
                 "cRLSign".to_string(),
             ],
             extended_key_usage: vec![],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         };
 
         self.generate_cert("ca", "certs/root-ca", &k8s_config, hosts)?;

@@ -32,6 +32,9 @@ impl<'a> ControllerManagerGenerator<'a> {
                 "keyEncipherment".to_string(),
             ],
             extended_key_usage: vec!["clientAuth".to_string()],
+            country: Some("US".to_string()),
+            state: Some("Columbia".to_string()),
+            locality: Some("Columbia".to_string()),
         };
 
         self.cert_ops.generate_cert(

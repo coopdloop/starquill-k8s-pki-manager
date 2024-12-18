@@ -4,11 +4,11 @@ mod cert;
 mod config;
 mod discovery;
 mod kubeconfig;
+mod metrics;
 mod types;
 mod ui;
 mod utils;
 mod web;
-mod metrics;
 
 use app::CertManager;
 use config::ClusterConfig;
@@ -68,7 +68,7 @@ async fn init_with_loading(
     terminal.draw(|f| ui::loading::render_loading(f, &loading_state))?;
     sleep(Duration::from_millis(100));
 
-    match ClusterConfig::load_from_file(&args.config) {
+    match ClusterConfig::load_from_file(&args.config).await {
         Ok(loaded_config) => {
             config = loaded_config;
             loading_state.next_step();
@@ -246,7 +246,6 @@ async fn init_with_loading(
     //         e
     //     ));
     // }
-
 
     Ok((web_state, cert_manager))
 }

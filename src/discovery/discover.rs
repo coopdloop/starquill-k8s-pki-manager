@@ -428,3 +428,28 @@ fn verify_certificate(cert_pem: &[u8]) -> io::Result<()> {
         ))
     }
 }
+
+pub async fn resolve_hostname(hostname: &str) -> io::Result<String> {
+    // If it's already an IP, return it
+    if hostname.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(hostname.to_string());
+    }
+
+    // Use DNS to resolve the hostname
+    match tokio::net::lookup_host(format!("{}:22", hostname)).await {
+        Ok(mut addresses) => {
+            if let Some(addr) = addresses.next() {
+                Ok(addr.ip().to_string())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("No IP address found for hostname: {}", hostname),
+                ))
+            }
+        }
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to resolve hostname {}: {}", hostname, e),
+        )),
+    }
+}
